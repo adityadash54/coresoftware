@@ -3,14 +3,16 @@
 #ifndef FUN4ALLRAW_FUN4ALLSTREAMINGINPUTMANAGER_H
 #define FUN4ALLRAW_FUN4ALLSTREAMINGINPUTMANAGER_H
 
-#include "InputManagerType.h"
+#include <fun4allraw/InputManagerType.h>
 
 #include <fun4all/Fun4AllInputManager.h>
 
+#include <TTree.h>
 #include <map>
 #include <set>
 #include <string>
 
+//class SingleStreamingInputv2;
 class SingleStreamingInput;
 class Gl1Packet;
 class InttRawHit;
@@ -22,6 +24,7 @@ class SyncObject;
 class TpcRawHit;
 class TH1;
 class TH2;
+class TTree;
 class Fun4AllStreamingInputManager : public Fun4AllInputManager
 {
  public:
@@ -46,6 +49,10 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   int FillMvtx();
   int FillTpc();
   void AddGl1RawHit(uint64_t bclk, Gl1Packet *hit);
+  void AddGl1Window(uint64_t bclk, int negative_window, int positive_window);
+  void AddGl1BunchNumber(uint64_t bclk, int bunch_number);
+  void SetGL1NegativeWindow(const unsigned int i);
+  void SetGL1PositiveWindow(const unsigned int i);
   void AddInttRawHit(uint64_t bclk, InttRawHit *hit);
   void AddMicromegasRawHit(uint64_t /* bclk */, MicromegasRawHit * /* hit */);
   void AddMvtxFeeIdInfo(uint64_t bclk, uint16_t feeid, uint32_t detField);
@@ -67,7 +74,15 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   void Streaming(bool b = true) { m_StreamingFlag = b; }
 
   void runMvtxTriggered(bool b = true) { m_mvtx_is_triggered = b; }
-
+    
+  void SetOutputFileName(const std::string &fileName);
+  void SetEndofEvent(bool flag = false, bool flag2 = false)
+  {
+    m_alldone_flag = flag;
+    m_lastevent_flag = flag2;
+  }
+  void SetEventNumber(int num) { m_event_number = num; }
+    
  private:
   struct MvtxRawHitInfo
   {
@@ -101,6 +116,7 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
     unsigned int EventFoundCounter{0};
   };
 
+  void createLuminosityHistos();
   void createQAHistos();
 
   SyncObject *m_SyncObject{nullptr};
@@ -109,6 +125,9 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   uint64_t m_RefBCO{0};
 
   int m_RunNumber{0};
+  uint64_t m_rawgl1scaler{0};
+  unsigned int m_negative_bco_window{0};
+  unsigned int m_positive_bco_window{0};
   unsigned int m_intt_bco_range{0};
   unsigned int m_intt_negative_bco{0};
   unsigned int m_micromegas_bco_range{0};
@@ -117,6 +136,10 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   unsigned int m_mvtx_negative_bco{0};
   unsigned int m_tpc_bco_range{0};
   unsigned int m_tpc_negative_bco{0};
+  bool m_alldone_flag = {false};
+  bool m_lastevent_flag = {false};
+  int m_event_number{0};
+  int m_diffBCO{0};
 
   bool m_gl1_registered_flag{false};
   bool m_intt_registered_flag{false};
@@ -125,7 +148,14 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   bool m_StreamingFlag{false};
   bool m_tpc_registered_flag{false};
   bool m_mvtx_is_triggered{false};
-
+  bool flat_overflow{false};
+    
+  uint64_t bco_temp = 0;
+  uint64_t m_bco_trim{};
+  uint64_t m_lower_bound{};
+  uint64_t m_upper_bound{};
+  int m_bunch_number{};
+    
   std::vector<SingleStreamingInput *> m_Gl1InputVector;
   std::vector<SingleStreamingInput *> m_InttInputVector;
   std::vector<SingleStreamingInput *> m_MicromegasInputVector;
@@ -137,8 +167,25 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   std::map<uint64_t, MvtxRawHitInfo> m_MvtxRawHitMap;
   std::map<uint64_t, TpcRawHitInfo> m_TpcRawHitMap;
   std::map<int, std::map<int, uint64_t>> m_InttPacketFeeBcoMap;
+  std::map<uint64_t, std::pair<uint64_t, uint64_t>> m_BCOWindows;
+  std::map<uint64_t, int> m_BCOBunchNumber;
+  std::map<int, long> m_bunchnumber_MBDNS_raw;
+  std::map<int, long> m_bunchnumber_MBDNS_live;
+  std::map<int, long> m_bunchnumber_MBDNS_scaled;
+  std::map<int, long> m_bunchnumber_ZDCCoin_raw;
+  // std::map<int, long> m_bunchnumber_rawgl1scaler;
 
   // QA histos
+  TH1 *h_lumibco{nullptr};
+  TH1 *h_bunchnumber{nullptr};
+  TH1 *h_bunchnumber_occur{nullptr};
+  TH1 *h_diffbco{nullptr};
+  TH1 *h_gl1p_MBDSN_bunchid_raw{nullptr};
+  TH1 *h_gl1p_MBDSN_bunchid_live{nullptr};
+  TH1 *h_gl1p_MBDSN_bunchid_scaled{nullptr};
+  TH1 *h_gl1p_rawgl1scaler{nullptr};
+  TH1 *h_gl1p_ZDCCoin_bunchid_raw{nullptr};
+    
   TH1 *h_refbco_mvtx{nullptr};
   TH1 *h_taggedAllFelixes_mvtx{nullptr};
   TH1 *h_taggedAllFelixesAllFees_mvtx{nullptr};
@@ -158,6 +205,10 @@ class Fun4AllStreamingInputManager : public Fun4AllInputManager
   TH1 *h_taggedAllFees_intt[8]{nullptr};
   TH1 *h_gl1taggedfee_intt[8][14]{{nullptr}};
   TH2 *h_bcodiff_intt[8]{nullptr};
+    
+  TTree *ttree = nullptr;
+  TFile *tfile = nullptr;
+  std::string m_outputFileName = "output.root";  // Default value
 
 };
 

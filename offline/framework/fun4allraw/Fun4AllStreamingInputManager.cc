@@ -37,9 +37,11 @@
 #include <phool/phool.h>  // for PHWHERE
 #include <boost/format.hpp>
 
+#include <TFile.h>
 #include <TH1.h>
 #include <TH2.h>
 #include <TSystem.h>
+#include <TTree.h>
 
 #include <algorithm>  // for max
 #include <cassert>
@@ -56,6 +58,7 @@ Fun4AllStreamingInputManager::Fun4AllStreamingInputManager(const std::string &na
   m_topNode = se->topNode(TopNodeName());
 
   createQAHistos();
+  createLuminosityHistos();
 
   return;
 }
@@ -587,6 +590,84 @@ int Fun4AllStreamingInputManager::FillGl1()
       }
     }
   }
+    
+  if (m_BCOWindows.size() > 1)
+  {
+    auto first_element = m_BCOWindows.begin();
+    auto second_element = std::next(m_BCOWindows.begin());
+    // special case for overflow: second_element - first_element > 1099511000000, then switch them
+    m_diffBCO = second_element->first - first_element->first;
+
+    if ((second_element->first - first_element->first)> 1099510000000)
+    {
+      flat_overflow = true;
+      // int temp_m_diffBCO=first_element->first+1099511627775+1-second_element->first;
+      bco_temp = first_element->first;
+      m_BCOWindows.erase(m_BCOWindows.begin());
+      bco_temp += 1099511627775 + 1;
+      m_BCOWindows[bco_temp] = std::make_pair(bco_temp - m_negative_bco_window, bco_temp + m_positive_bco_window);
+      first_element = m_BCOWindows.begin();
+      second_element = std::next(m_BCOWindows.begin());
+      m_diffBCO = second_element->first - first_element->first;
+      std::cout << "overflow new diff " << m_diffBCO << " new first element " << first_element->first << " new second element " << second_element->first << std::endl;
+    }
+    h_diffbco->Fill(m_diffBCO);
+    if (m_diffBCO < static_cast<int>(m_negative_bco_window + m_positive_bco_window))
+    {
+      m_BCOWindows.begin()->second.second = second_element->second.first;
+      //std::cout << "*** new Key 1 BCO " << m_BCOWindows.begin()->first << " left " << m_BCOWindows.begin()->second.first << " right " << m_BCOWindows.begin()->second.second << std::endl;
+    }
+  }
+
+  m_bco_trim = m_BCOWindows.begin()->first;
+  m_lower_bound = m_BCOWindows.begin()->second.first;
+  m_upper_bound = m_BCOWindows.begin()->second.second;
+  m_bunch_number = m_BCOBunchNumber[m_BCOWindows.begin()->first];
+  // ttree->Fill();
+  h_bunchnumber->Fill(m_BCOBunchNumber[m_BCOWindows.begin()->first]);
+  h_lumibco->Fill(m_BCOWindows.begin()->second.second - m_BCOWindows.begin()->second.first);
+
+    int lower = (m_bco_trim> m_lower_bound) ? static_cast<int>(m_bco_trim - m_lower_bound): -1 * static_cast<int>(m_lower_bound - m_bco_trim); //casting from uint64 to int can cause issues if the number is large, safer to calculate the difference as a positive value then cast
+    lower=-1.0*lower;
+    int upper = (m_upper_bound > m_bco_trim) ? static_cast<int>(m_upper_bound - m_bco_trim) : -1 * static_cast<int>(m_bco_trim - m_upper_bound);  // it is possible that upper is <0
+                                                                                                                                                // std::cout<<"lower="<<lower<<", upper = "<<upper<<std::endl;//<<" or upper2 = "<<lower+(m_BCOWindows.begin()->second.second - m_BCOWindows.begin()->second.first)<<std::endl;
+  for (int i = lower; i < upper; i++)
+  {
+    int adjusted_bunch = m_bunch_number + i;
+//    while (adjusted_bunch < 0)
+//    {
+//      adjusted_bunch += 120;
+//    }
+//    while (adjusted_bunch > 119)
+//    {
+//      adjusted_bunch -= 120;
+//    }
+    adjusted_bunch = ((adjusted_bunch % 120) + 120) % 120; //wrap bunchnumber to [0,119]
+      
+    if (i != 0)
+    {
+      h_bunchnumber_occur->Fill(adjusted_bunch);
+    }  // else{std::cout<<"same gl1 removed"<<std::endl;}
+  }
+
+  if (!m_BCOBunchNumber.empty())
+  {
+    m_BCOBunchNumber.erase(m_BCOWindows.begin()->first);
+    // m_BCOBunchNumber.erase(m_BCOBunchNumber.begin());
+  }
+  if (!m_BCOWindows.empty())
+  {
+    m_BCOWindows.erase(m_BCOWindows.begin());
+  }
+  if (flat_overflow)
+  {
+    m_BCOWindows.erase(m_BCOWindows.begin());
+    bco_temp -= 1099511627775 + 1;
+    m_BCOWindows[bco_temp] = std::make_pair(bco_temp - m_negative_bco_window, bco_temp + m_positive_bco_window); //Create bcowindow again although the entry would be erased if flat_overflow were false?
+    std::cout << " Change back, new bco window map  " << m_BCOBunchNumber.begin()->first << std::endl;
+    flat_overflow = false;
+  }
+    
   if (m_Gl1RawHitMap.empty())
   {
     std::cout << "Gl1RawHitMap is empty - we are done" << std::endl;
@@ -610,12 +691,63 @@ int Fun4AllStreamingInputManager::FillGl1()
     m_RefBCO = m_RefBCO & 0xFFFFFFFFFFU;  // 40 bits (need to handle rollovers)
                                           //    std::cout << "BCOis " << std::hex << m_RefBCO << std::dec << std::endl;
   }
+    
+  //add for mbd p_gl1
+  Gl1Packet *p_gl1 = findNode::getClass<Gl1Packet>(m_topNode,"GL1RAWHIT");//"GL1Packet");
+  if (!p_gl1)
+  {
+      std::cout << "CAN not find this Gl1Packet" << std::endl;
+  }
+  else{
+      int bunchnumber = p_gl1->getBunchNumber();
+//    uint64_t evtBCO_gl1 = p_gl1->getBCO() & 0xFFFFFFFFFFU;
+//        for (int i = 0; i <9;i++)// int(GL1PScaler_raw_vec.size()); i++)
+//        {
+          if (p_gl1->lValue(0, "GL1PRAW"))// 0-8, 0 is MBDSN
+          {
+          //    GL1PScaler_raw_vec[i][bunchnumber] = p_gl1->lValue(i, "GL1PRAW");
+//        std::cout<<"evtBCO: "<<evtBCO_gl1<<" bunchnumber ="<<bunchnumber<<" i = "<<i<<" ,gl1praw = " <<p_gl1->lValue(i, "GL1PRAW")<<std::endl;
+      m_bunchnumber_MBDNS_raw[bunchnumber] = p_gl1->lValue(0, "GL1PRAW");
+              m_bunchnumber_MBDNS_live[bunchnumber] = p_gl1->lValue(0, "GL1PLIVE");
+              m_bunchnumber_MBDNS_scaled[bunchnumber] = p_gl1->lValue(0, "GL1PSCALED");
+      m_bunchnumber_ZDCCoin_raw[bunchnumber] = p_gl1->lValue(5, "GL1PRAW");//zdc coincidence
+      //h_gl1p_MBDSN_bunchid->Fill(bunchnumber, p_gl1->lValue(0, "GL1PRAW"));
+      //std::cout<<" bunchnumber ="<<bunchnumber<<" ,gl1praw = " <<p_gl1->lValue(0, "GL1PRAW")<<std::endl;
+          }
+//      }
+  if(p_gl1->lValue(0, 0)){
+//        m_bunchnumber_rawgl1scaler[bunchnumber] = p_gl1->lValue(0, 0);
+  //    std::cout<<" bunchnumber ="<<bunchnumber<<" ,gl1rawscaler = "<< p_gl1->lValue(0, 0)<<std::endl;
+      m_rawgl1scaler= p_gl1->lValue(0, 0);
+  }
+  }
+  ttree->Fill();
+    
+  if(m_lastevent_flag){
+         for (const auto &[bunchnumber, mbdns_value] : m_bunchnumber_MBDNS_raw) {
+             h_gl1p_MBDSN_bunchid_raw->Fill(bunchnumber, mbdns_value);
+         }
+         for (const auto &[bunchnumber, mbdns_value] : m_bunchnumber_MBDNS_live) {
+             h_gl1p_MBDSN_bunchid_live->Fill(bunchnumber, mbdns_value);
+         }
+         for (const auto &[bunchnumber, mbdns_value] : m_bunchnumber_MBDNS_scaled) {
+             h_gl1p_MBDSN_bunchid_scaled->Fill(bunchnumber, mbdns_value);
+         }
+         //for (const auto &[bunchnumber, mbdns_value] : m_bunchnumber_rawgl1scaler) {
+             h_gl1p_rawgl1scaler->Fill(1, m_rawgl1scaler);
+         //}
+        for (const auto &[bunchnumber, mbdns_value] : m_bunchnumber_ZDCCoin_raw) {
+             h_gl1p_ZDCCoin_bunchid_raw->Fill(bunchnumber, mbdns_value);
+         }
+   
+  }
   // if we run streaming, we only need the first gl1 bco to skip over all the junk
   // which is taken before the daq actually starts. But once we have the first event
   // and set the refBCO to the beginning of the run, we don't want the gl1 anymore
   // so we delete its input manager(s) and unregister it
   // deleting it also deletes all its allocated memory, so we don't have to worry
   // about clearing all gl1 related maps
+    
   if (m_StreamingFlag)
   {
     for (auto iter : m_Gl1InputVector)
@@ -634,9 +766,56 @@ int Fun4AllStreamingInputManager::FillGl1()
     m_Gl1RawHitMap.begin()->second.Gl1RawHitVector.clear();
     m_Gl1RawHitMap.erase(m_Gl1RawHitMap.begin());
   }
+    
+  if (Verbosity() > 0){
+     if(m_alldone_flag){std::cout<<"all done is true"<<std::endl;}
+  }
   // std::cout << "size  m_Gl1RawHitMap: " <<  m_Gl1RawHitMap.size()
   // 	    << std::endl;
+  
+  if(m_alldone_flag){
+    std::cout << m_event_number << " Events -- Storing files to output.root" << std::endl;
+    std::string updatedFileName = m_outputFileName + "_" + std::to_string(m_event_number) + ".root";
+    if (TFile::Open(updatedFileName.c_str(), "READ"))
+    {
+      updatedFileName = m_outputFileName + "_" + std::to_string(m_event_number + 1) + ".root";
+    }
+    tfile = TFile::Open(updatedFileName.c_str(), "RECREATE", "");
+    ttree->Write("", TObject::kOverwrite);
+    h_lumibco->Write("", TObject::kOverwrite);
+    h_bunchnumber->Write("", TObject::kOverwrite);
+    h_bunchnumber_occur->Write("", TObject::kOverwrite);
+    h_diffbco->Write("", TObject::kOverwrite);
+    h_gl1p_MBDSN_bunchid_raw->Write("", TObject::kOverwrite);
+    h_gl1p_MBDSN_bunchid_live->Write("", TObject::kOverwrite);
+    h_gl1p_MBDSN_bunchid_scaled->Write("", TObject::kOverwrite);
+    h_gl1p_rawgl1scaler->Write("", TObject::kOverwrite);
+    h_gl1p_ZDCCoin_bunchid_raw->Write("", TObject::kOverwrite);
+    tfile->Close();
+    delete tfile;
+
+     ttree->Reset();
+     h_lumibco->Reset();
+     h_bunchnumber->Reset();
+     h_bunchnumber_occur->Reset();
+     h_diffbco->Reset();
+     h_gl1p_MBDSN_bunchid_raw->Reset();
+     h_gl1p_MBDSN_bunchid_live->Reset();
+     h_gl1p_MBDSN_bunchid_scaled->Reset();
+    h_gl1p_rawgl1scaler->Reset();
+    h_gl1p_ZDCCoin_bunchid_raw->Reset();
+  }
   return 0;
+}
+
+void Fun4AllStreamingInputManager::SetGL1NegativeWindow(const unsigned int i)
+{
+  m_negative_bco_window = std::max(i, m_negative_bco_window);
+}
+
+void Fun4AllStreamingInputManager::SetGL1PositiveWindow(const unsigned int i)
+{
+    m_positive_bco_window = std::max(i, m_positive_bco_window);
 }
 
 int Fun4AllStreamingInputManager::FillIntt()
@@ -1558,4 +1737,87 @@ void Fun4AllStreamingInputManager::createQAHistos()
   }
 
 
+}
+
+void Fun4AllStreamingInputManager::createLuminosityHistos()
+{
+  auto hm = QAHistManagerDef::getHistoManager();
+  assert(hm);
+  // zhiwan
+  {
+    auto tr = new TTree("BCOWindowTree", "BCO Window Data");
+    tr->Branch("bco_trim", &m_bco_trim);
+    tr->Branch("lower_bound", &m_lower_bound);
+    tr->Branch("upper_bound", &m_upper_bound);
+    tr->Branch("bunch_number", &m_bunch_number);
+    //  tr->Branch("rawgl1scaler", &m_rawgl1scaler);
+    tr->SetAutoFlush(100000);
+    hm->registerHisto(tr);
+  }
+
+  {
+    auto h = new TH1I("h_LumiBCO", "Lumi BCO", 500, 0, 500);
+    h->GetXaxis()->SetTitle(" Lumi BCO per event");
+    h->SetTitle("Number of BCO matched");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1I("h_BunchNumber", "Bunch Number Lumi BCO", 121, -0.5, 120.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_BunchNumberOccurance", "Bunch Number Lumi BCO", 120, -0.5, 119.5);
+    h->GetXaxis()->SetTitle("Bunch Number per time window");
+    h->SetTitle("Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1I("h_diffBCO", "gl1 bco 1-2", 3500, 0, 3500);
+    h->GetXaxis()->SetTitle("GL1 BCO difference");
+    h->SetTitle("Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_MBDSNraw_BunchID", "Bunch Number Lumi BCO", 121, -0.5, 120.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("MBDSN Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_MBDSNlive_BunchID", "Bunch Number Lumi BCO", 121, -0.5, 120.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("MBDSN Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_MBDSNscaled_BunchID", "Bunch Number Lumi BCO", 121, -0.5, 120.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("MBDSN Number of crossing");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_rawgl1scalerBunchID", "Bunch Number Lumi BCO", 10, -0.5, 9.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("raw GL1 scaler");
+    hm->registerHisto(h);
+  }
+  {
+    auto h = new TH1D("h_gl1p_ZDCCoin_BunchID", "Bunch Number Lumi BCO", 121, -0.5, 120.5);
+    h->GetXaxis()->SetTitle("Bunch Number per event");
+    h->SetTitle("raw GL1 scaler");
+    hm->registerHisto(h);
+  }
+  // Get the global pointers
+  h_lumibco = dynamic_cast<TH1 *>(hm->getHisto("h_LumiBCO"));
+  h_bunchnumber = dynamic_cast<TH1 *>(hm->getHisto("h_BunchNumber"));
+  h_bunchnumber_occur = dynamic_cast<TH1 *>(hm->getHisto("h_BunchNumberOccurance"));
+  ttree = dynamic_cast<TTree *>(hm->getHisto("BCOWindowTree"));
+  h_diffbco = dynamic_cast<TH1 *>(hm->getHisto("h_diffBCO"));
+  h_gl1p_MBDSN_bunchid_raw = dynamic_cast<TH1 *>(hm->getHisto("h_MBDSNraw_BunchID"));
+  h_gl1p_MBDSN_bunchid_live = dynamic_cast<TH1 *>(hm->getHisto("h_MBDSNlive_BunchID"));
+  h_gl1p_MBDSN_bunchid_scaled = dynamic_cast<TH1 *>(hm->getHisto("h_MBDSNscaled_BunchID"));
+  h_gl1p_rawgl1scaler = dynamic_cast<TH1 *>(hm->getHisto("h_rawgl1scalerBunchID"));
+  h_gl1p_ZDCCoin_bunchid_raw = dynamic_cast<TH1 *>(hm->getHisto("h_gl1p_ZDCCoin_BunchID"));
 }
