@@ -12,6 +12,7 @@
 class Eventiterator;
 class Fun4AllEvtInputPoolManager;
 class Fun4AllStreamingInputManager;
+class Fun4AllStreamingLumiCountingInputManager;
 class PHCompositeNode;
 
 class SingleStreamingInput : public Fun4AllBase, public InputFileHandler
@@ -47,8 +48,10 @@ class SingleStreamingInput : public Fun4AllBase, public InputFileHandler
   virtual Eventiterator *GetEventiterator() const { return m_EventIterator; }
   virtual Fun4AllStreamingInputManager *StreamingInputManager() { return m_StreamingInputMgr; }
   virtual void StreamingInputManager(Fun4AllStreamingInputManager *in) { m_StreamingInputMgr = in; }
+  virtual void StreamingLumiCountingInputManager(Fun4AllStreamingLumiCountingInputManager *in) { m_StreamingLumiInputMgr = in; }
   virtual void CreateDSTNode(PHCompositeNode *) { return; }
   virtual void ConfigureStreamingInputManager() { return; }
+  virtual void ConfigureStreamingLumiCountingInputManager() { return; }
   virtual void SubsystemEnum(const int id) { m_SubsystemEnum = id; }
   virtual int SubsystemEnum() const { return m_SubsystemEnum; }
   void MaxBclkDiff(uint64_t ui) { m_MaxBclkSpread = ui; }
@@ -117,6 +120,7 @@ class SingleStreamingInput : public Fun4AllBase, public InputFileHandler
   Eventiterator *m_EventIterator{nullptr};
   //  Fun4AllEvtInputPoolManager *m_InputMgr {nullptr};
   Fun4AllStreamingInputManager *m_StreamingInputMgr{nullptr};
+  Fun4AllStreamingLumiCountingInputManager *m_StreamingLumiInputMgr{nullptr};
   uint64_t m_MaxBclkSpread{1000000};
   unsigned int m_EventNumberOffset{1};  // packet event counters start at 0 but we start with event number 1
   int m_RunNumber{0};

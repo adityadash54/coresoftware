@@ -1,4 +1,4 @@
-#include "Fun4AllStreamingInputManager.h"
+#include "Fun4AllStreamingLumiCountingInputManager.h"
 
 #include "InputManagerType.h"
 #include "MvtxRawDefs.h"
@@ -48,7 +48,7 @@
 #include <iostream>  // for operator<<, basic_ostream, endl
 #include <utility>   // for pair
 
-Fun4AllStreamingInputManager::Fun4AllStreamingInputManager(const std::string &name, const std::string &dstnodename, const std::string &topnodename)
+Fun4AllStreamingLumiCountingInputManager::Fun4AllStreamingLumiCountingInputManager(const std::string &name, const std::string &dstnodename, const std::string &topnodename)
   : Fun4AllInputManager(name, dstnodename, topnodename)
   , m_SyncObject(new SyncObjectv1())
 {
@@ -56,11 +56,13 @@ Fun4AllStreamingInputManager::Fun4AllStreamingInputManager(const std::string &na
   m_topNode = se->topNode(TopNodeName());
 
   createQAHistos();
+  createLuminosityHistos();
+    
 
   return;
 }
 
-Fun4AllStreamingInputManager::~Fun4AllStreamingInputManager()
+Fun4AllStreamingLumiCountingInputManager::~Fun4AllStreamingLumiCountingInputManager()
 {
   if (IsOpen())
   {
@@ -145,7 +147,7 @@ Fun4AllStreamingInputManager::~Fun4AllStreamingInputManager()
   m_MicromegasInputVector.clear();
 }
 
-int Fun4AllStreamingInputManager::run(const int /*nevents*/)
+int Fun4AllStreamingLumiCountingInputManager::run(const int /*nevents*/)
 {
   int iret = 0;
   if (m_gl1_registered_flag)  // Gl1 first to get the reference
@@ -251,12 +253,12 @@ int Fun4AllStreamingInputManager::run(const int /*nevents*/)
   //  return 0;
 }
 
-int Fun4AllStreamingInputManager::fileclose()
+int Fun4AllStreamingLumiCountingInputManager::fileclose()
 {
   return 0;
 }
 
-void Fun4AllStreamingInputManager::Print(const std::string &what) const
+void Fun4AllStreamingLumiCountingInputManager::Print(const std::string &what) const
 {
   if (what == "TPC")
   {
@@ -313,7 +315,7 @@ void Fun4AllStreamingInputManager::Print(const std::string &what) const
   return;
 }
 
-int Fun4AllStreamingInputManager::ResetEvent()
+int Fun4AllStreamingLumiCountingInputManager::ResetEvent()
 {
   // for (auto iter : m_EvtInputVector)
   // {
@@ -324,7 +326,7 @@ int Fun4AllStreamingInputManager::ResetEvent()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::PushBackEvents(const int /*i*/)
+int Fun4AllStreamingLumiCountingInputManager::PushBackEvents(const int /*i*/)
 {
   return 0;
   // PushBackEvents is supposedly pushing events back on the stack which works
@@ -340,7 +342,7 @@ int Fun4AllStreamingInputManager::PushBackEvents(const int /*i*/)
   //     return 0;
   //   }
   //   std::cout << PHWHERE << Name()
-  //        << " Fun4AllStreamingInputManager cannot push back " << i << " events into file"
+  //        << " Fun4AllStreamingLumiCountingInputManager cannot push back " << i << " events into file"
   //        << std::endl;
   //   return -1;
   // }
@@ -379,7 +381,7 @@ int Fun4AllStreamingInputManager::PushBackEvents(const int /*i*/)
   // return errorflag;
 }
 
-int Fun4AllStreamingInputManager::GetSyncObject(SyncObject **mastersync)
+int Fun4AllStreamingLumiCountingInputManager::GetSyncObject(SyncObject **mastersync)
 {
   // here we copy the sync object from the current file to the
   // location pointed to by mastersync. If mastersync is a 0 pointer
@@ -400,7 +402,7 @@ int Fun4AllStreamingInputManager::GetSyncObject(SyncObject **mastersync)
   return Fun4AllReturnCodes::SYNC_OK;
 }
 
-int Fun4AllStreamingInputManager::SyncIt(const SyncObject *mastersync)
+int Fun4AllStreamingLumiCountingInputManager::SyncIt(const SyncObject *mastersync)
 {
   if (!mastersync)
   {
@@ -421,15 +423,15 @@ int Fun4AllStreamingInputManager::SyncIt(const SyncObject *mastersync)
   return Fun4AllReturnCodes::SYNC_OK;
 }
 
-std::string Fun4AllStreamingInputManager::GetString(const std::string &what) const
+std::string Fun4AllStreamingLumiCountingInputManager::GetString(const std::string &what) const
 {
   std::cout << PHWHERE << " called with " << what << " , returning empty string" << std::endl;
   return "";
 }
 
-void Fun4AllStreamingInputManager::registerStreamingInput(SingleStreamingInput *evtin, InputManagerType::enu_subsystem system)
+void Fun4AllStreamingLumiCountingInputManager::registerStreamingInput(SingleStreamingInput *evtin, InputManagerType::enu_subsystem system)
 {
-  evtin->StreamingInputManager(this);
+  evtin->StreamingLumiCountingInputManager(this);
   // if the streaming flag is set, we only want the first event from the GL1 to
   // get the starting BCO of that run which enables us to dump all the junk which
   // is taken before the run starts in the streaming systems. But we don't want the
@@ -445,7 +447,7 @@ void Fun4AllStreamingInputManager::registerStreamingInput(SingleStreamingInput *
   {
     evtin->CreateDSTNode(m_topNode);
   }
-  evtin->ConfigureStreamingInputManager();
+  evtin->ConfigureStreamingLumiCountingInputManager();
   switch (system)
   {
   case InputManagerType::MVTX:
@@ -483,7 +485,7 @@ void Fun4AllStreamingInputManager::registerStreamingInput(SingleStreamingInput *
   }
 }
 
-void Fun4AllStreamingInputManager::AddGl1RawHit(uint64_t bclk, Gl1Packet *hit)
+void Fun4AllStreamingLumiCountingInputManager::AddGl1RawHit(uint64_t bclk, Gl1Packet *hit)
 {
   if (Verbosity() > 1)
   {
@@ -493,7 +495,7 @@ void Fun4AllStreamingInputManager::AddGl1RawHit(uint64_t bclk, Gl1Packet *hit)
   m_Gl1RawHitMap[bclk].Gl1RawHitVector.push_back(hit);
 }
 
-void Fun4AllStreamingInputManager::AddMvtxRawHit(uint64_t bclk, MvtxRawHit *hit)
+void Fun4AllStreamingLumiCountingInputManager::AddMvtxRawHit(uint64_t bclk, MvtxRawHit *hit)
 {
   if (Verbosity() > 1)
   {
@@ -503,7 +505,7 @@ void Fun4AllStreamingInputManager::AddMvtxRawHit(uint64_t bclk, MvtxRawHit *hit)
   m_MvtxRawHitMap[bclk].MvtxRawHitVector.push_back(hit);
 }
 
-void Fun4AllStreamingInputManager::AddMvtxFeeIdInfo(uint64_t bclk, uint16_t feeid, uint32_t detField)
+void Fun4AllStreamingLumiCountingInputManager::AddMvtxFeeIdInfo(uint64_t bclk, uint16_t feeid, uint32_t detField)
 {
   if (Verbosity() > 1)
   {
@@ -517,7 +519,7 @@ void Fun4AllStreamingInputManager::AddMvtxFeeIdInfo(uint64_t bclk, uint16_t feei
   m_MvtxRawHitMap[bclk].MvtxFeeIdInfoVector.push_back(feeidInfo);
 }
 
-void Fun4AllStreamingInputManager::AddMvtxL1TrgBco(uint64_t bclk, uint64_t lv1Bco)
+void Fun4AllStreamingLumiCountingInputManager::AddMvtxL1TrgBco(uint64_t bclk, uint64_t lv1Bco)
 {
   if (Verbosity() > 1)
   {
@@ -527,7 +529,7 @@ void Fun4AllStreamingInputManager::AddMvtxL1TrgBco(uint64_t bclk, uint64_t lv1Bc
   m_MvtxRawHitMap[bclk].MvtxL1TrgBco.insert(lv1Bco);
 }
 
-void Fun4AllStreamingInputManager::AddInttRawHit(uint64_t bclk, InttRawHit *hit)
+void Fun4AllStreamingLumiCountingInputManager::AddInttRawHit(uint64_t bclk, InttRawHit *hit)
 {
   if (Verbosity() > 1)
   {
@@ -538,7 +540,7 @@ void Fun4AllStreamingInputManager::AddInttRawHit(uint64_t bclk, InttRawHit *hit)
   m_InttPacketFeeBcoMap[hit->get_packetid()][hit->get_fee()] = bclk;
 }
 
-void Fun4AllStreamingInputManager::AddMicromegasRawHit(uint64_t bclk, MicromegasRawHit *hit)
+void Fun4AllStreamingLumiCountingInputManager::AddMicromegasRawHit(uint64_t bclk, MicromegasRawHit *hit)
 {
   if (Verbosity() > 1)
   {
@@ -548,7 +550,7 @@ void Fun4AllStreamingInputManager::AddMicromegasRawHit(uint64_t bclk, Micromegas
   m_MicromegasRawHitMap[bclk].MicromegasRawHitVector.push_back(hit);
 }
 
-void Fun4AllStreamingInputManager::AddTpcRawHit(uint64_t bclk, TpcRawHit *hit)
+void Fun4AllStreamingLumiCountingInputManager::AddTpcRawHit(uint64_t bclk, TpcRawHit *hit)
 {
   if (Verbosity() > 1)
   {
@@ -558,14 +560,14 @@ void Fun4AllStreamingInputManager::AddTpcRawHit(uint64_t bclk, TpcRawHit *hit)
   m_TpcRawHitMap[bclk].TpcRawHitVector.push_back(hit);
 }
 
-int Fun4AllStreamingInputManager::FillGl1()
+int Fun4AllStreamingLumiCountingInputManager::FillGl1()
 {
   // unsigned int alldone = 0;
   for (auto iter : m_Gl1InputVector)
   {
     if (Verbosity() > 0)
     {
-      std::cout << "Fun4AllStreamingInputManager::FillGl1 - fill pool for " << iter->Name() << std::endl;
+      std::cout << "Fun4AllStreamingLumiCountingInputManager::FillGl1 - fill pool for " << iter->Name() << std::endl;
     }
     iter->FillPool();
     if (m_RunNumber == 0)
@@ -595,20 +597,36 @@ int Fun4AllStreamingInputManager::FillGl1()
   //    std::cout << "stashed gl1 BCOs: " << m_Gl1RawHitMap.size() << std::endl;
   Gl1Packet *gl1packet = findNode::getClass<Gl1Packet>(m_topNode, "GL1RAWHIT");
   //  std::cout << "before filling m_Gl1RawHitMap size: " <<  m_Gl1RawHitMap.size() << std::endl;
+    
+  //Add a loop to check for overflow using min max and if greater than add 1099510000000 to all the small bcos to align them so that there are no complications later?
   for (auto gl1hititer : m_Gl1RawHitMap.begin()->second.Gl1RawHitVector)
   {
-    if (Verbosity() > 1)
-    {
-      gl1hititer->identify();
-    }
-    if (!m_StreamingFlag)  // if streaming flag is set, the gl1packet is a nullptr
-    {
-      gl1packet->FillFrom(gl1hititer);
-      MySyncManager()->CurrentEvent(gl1packet->getEvtSequence());
-    }
-    m_RefBCO = gl1hititer->getBCO();
-    m_RefBCO = m_RefBCO & 0xFFFFFFFFFFU;  // 40 bits (need to handle rollovers)
-                                          //    std::cout << "BCOis " << std::hex << m_RefBCO << std::dec << std::endl;
+      if (Verbosity() > 1)
+      {
+          gl1hititer->identify();
+      }
+      if (!m_StreamingFlag)  // if streaming flag is set, the gl1packet is a nullptr
+      {
+          gl1packet->FillFrom(gl1hititer);
+          MySyncManager()->CurrentEvent(gl1packet->getEvtSequence());
+      }
+      m_RefBCO_64 = gl1hititer->getBCO(); //64 represents uint64 structure of the GL1 BCOs
+      m_RefBCO = m_RefBCO_64 & 0xFFFFFFFFFFU;  // 40 bits (need to handle rollovers)
+      //    std::cout << "BCOis " << std::hex << m_RefBCO << std::dec << std::endl;
+      
+      m_BCOWindows[m_RefBCO_64] = std::make_pair(m_RefBCO_64-m_negative_bco_window,m_RefBCO_64+m_positive_bco_window); //should I use m_RefBCO or m_RefBCO_64?
+      
+      for (auto gl1hititer_next : std::next(m_Gl1RawHitMap.begin())->second.Gl1RawHitVector){
+          
+          m_RefBCO_next_64 = gl1hititer_next->getBCO();
+          m_diffBCO= m_RefBCO_next_64 - m_RefBCO_64;
+          
+          if(m_diffBCO < static_cast<int>(m_negative_bco_window+m_positive_bco_window) ){
+              m_BCOWindows[m_RefBCO_64] = std::make_pair(m_RefBCO_64-m_negative_bco_window,m_RefBCO_next_64-m_negative_bco_window); //should I use m_RefBCO or m_RefBCO_64 and similarly for m_RefBCO_next_64?
+          }
+      }
+      
+      h_lumibco->Fill(static_cast<int>(m_diffBCO));
   }
   // if we run streaming, we only need the first gl1 bco to skip over all the junk
   // which is taken before the daq actually starts. But once we have the first event
@@ -636,10 +654,17 @@ int Fun4AllStreamingInputManager::FillGl1()
   }
   // std::cout << "size  m_Gl1RawHitMap: " <<  m_Gl1RawHitMap.size()
   // 	    << std::endl;
+    
+    
+    tfile = TFile::Open("output.root", "RECREATE", "");
+    h_lumibco->Write("", TObject::kOverwrite);
+    tfile->Close();
+    delete tfile;
+    
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillIntt()
+int Fun4AllStreamingLumiCountingInputManager::FillIntt()
 {
   int iret = FillInttPool();
   if (iret)
@@ -804,7 +829,7 @@ int Fun4AllStreamingInputManager::FillIntt()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillMvtx()
+int Fun4AllStreamingLumiCountingInputManager::FillMvtx()
 {
   int iret = FillMvtxPool();
   if (iret)
@@ -1058,7 +1083,7 @@ int Fun4AllStreamingInputManager::FillMvtx()
 }
 
 //_______________________________________________________
-int Fun4AllStreamingInputManager::FillMicromegas()
+int Fun4AllStreamingLumiCountingInputManager::FillMicromegas()
 {
   int iret = FillMicromegasPool();
   if (iret)
@@ -1090,7 +1115,7 @@ int Fun4AllStreamingInputManager::FillMicromegas()
   if (Verbosity() > 2)
   {
     std::cout
-        << "Fun4AllStreamingInputManager::FillMicromegas - select Micromegas crossings"
+        << "Fun4AllStreamingLumiCountingInputManager::FillMicromegas - select Micromegas crossings"
         << " from 0x" << std::hex << first_bco
         << " to 0x" << last_bco
         << " for ref BCO " << m_RefBCO
@@ -1147,7 +1172,7 @@ int Fun4AllStreamingInputManager::FillMicromegas()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillTpc()
+int Fun4AllStreamingLumiCountingInputManager::FillTpc()
 {
   int iret = FillTpcPool();
   if (iret)
@@ -1242,47 +1267,47 @@ int Fun4AllStreamingInputManager::FillTpc()
   return 0;
 }
 
-void Fun4AllStreamingInputManager::SetInttBcoRange(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetInttBcoRange(const unsigned int i)
 {
   m_intt_bco_range = std::max(i, m_intt_bco_range);
 }
 
-void Fun4AllStreamingInputManager::SetInttNegativeBco(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetInttNegativeBco(const unsigned int i)
 {
   m_intt_negative_bco = std::max(i, m_intt_negative_bco);
 }
 
-void Fun4AllStreamingInputManager::SetMicromegasBcoRange(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetMicromegasBcoRange(const unsigned int i)
 {
   m_micromegas_bco_range = std::max(i, m_micromegas_bco_range);
 }
 
-void Fun4AllStreamingInputManager::SetMicromegasNegativeBco(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetMicromegasNegativeBco(const unsigned int i)
 {
   m_micromegas_negative_bco = std::max(i, m_micromegas_negative_bco);
 }
 
-void Fun4AllStreamingInputManager::SetMvtxNegativeBco(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetMvtxNegativeBco(const unsigned int i)
 {
   m_mvtx_negative_bco = std::max(i, m_mvtx_negative_bco);
 }
 
-void Fun4AllStreamingInputManager::SetTpcBcoRange(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetTpcBcoRange(const unsigned int i)
 {
   m_tpc_bco_range = std::max(i, m_tpc_bco_range);
 }
 
-void Fun4AllStreamingInputManager::SetTpcNegativeBco(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetTpcNegativeBco(const unsigned int i)
 {
   m_tpc_negative_bco = std::max(i, m_tpc_negative_bco);
 }
 
-void Fun4AllStreamingInputManager::SetMvtxBcoRange(const unsigned int i)
+void Fun4AllStreamingLumiCountingInputManager::SetMvtxBcoRange(const unsigned int i)
 {
   m_mvtx_bco_range = std::max(i, m_mvtx_bco_range);
 }
 
-int Fun4AllStreamingInputManager::FillInttPool()
+int Fun4AllStreamingLumiCountingInputManager::FillInttPool()
 {
   uint64_t ref_bco_minus_range = 0;
   if (m_RefBCO > m_intt_negative_bco)
@@ -1295,7 +1320,7 @@ int Fun4AllStreamingInputManager::FillInttPool()
 	  iter->SetStandaloneMode(true);
 	if (Verbosity() > 0)
 	{
-	  std::cout << "Fun4AllStreamingInputManager::FillInttPool - fill pool for " << iter->Name() << std::endl;
+	  std::cout << "Fun4AllStreamingLumiCountingInputManager::FillInttPool - fill pool for " << iter->Name() << std::endl;
 	}
 	iter->FillPool(ref_bco_minus_range);
 	// iter->FillPool();
@@ -1326,7 +1351,7 @@ int Fun4AllStreamingInputManager::FillInttPool()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillTpcPool()
+int Fun4AllStreamingLumiCountingInputManager::FillTpcPool()
 {
   uint64_t ref_bco_minus_range = 0;
   if (m_RefBCO > m_tpc_negative_bco)
@@ -1338,7 +1363,7 @@ int Fun4AllStreamingInputManager::FillTpcPool()
   {
     if (Verbosity() > 0)
     {
-      std::cout << "Fun4AllStreamingInputManager::FillTpcPool - fill pool for " << iter->Name() << std::endl;
+      std::cout << "Fun4AllStreamingLumiCountingInputManager::FillTpcPool - fill pool for " << iter->Name() << std::endl;
     }
     iter->FillPool(ref_bco_minus_range);
     if (m_RunNumber == 0)
@@ -1368,13 +1393,13 @@ int Fun4AllStreamingInputManager::FillTpcPool()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillMicromegasPool()
+int Fun4AllStreamingLumiCountingInputManager::FillMicromegasPool()
 {
   for (auto iter : m_MicromegasInputVector)
   {
     if (Verbosity() > 0)
     {
-      std::cout << "Fun4AllStreamingInputManager::FillMicromegasPool - fill pool for " << iter->Name() << std::endl;
+      std::cout << "Fun4AllStreamingLumiCountingInputManager::FillMicromegasPool - fill pool for " << iter->Name() << std::endl;
     }
     iter->FillPool();
     if (m_RunNumber == 0)
@@ -1404,14 +1429,14 @@ int Fun4AllStreamingInputManager::FillMicromegasPool()
   return 0;
 }
 
-int Fun4AllStreamingInputManager::FillMvtxPool()
+int Fun4AllStreamingLumiCountingInputManager::FillMvtxPool()
 {
   uint64_t ref_bco_minus_range = m_RefBCO < m_mvtx_bco_range ? m_mvtx_bco_range : m_RefBCO - m_mvtx_bco_range;
   for (auto iter : m_MvtxInputVector)
   {
     if (Verbosity() > 3)
     {
-      std::cout << "Fun4AllStreamingInputManager::FillMvtxPool - fill pool for " << iter->Name() << std::endl;
+      std::cout << "Fun4AllStreamingLumiCountingInputManager::FillMvtxPool - fill pool for " << iter->Name() << std::endl;
     }
     iter->FillPool(ref_bco_minus_range);
     if (m_RunNumber == 0)
@@ -1440,7 +1465,7 @@ int Fun4AllStreamingInputManager::FillMvtxPool()
   }
   return 0;
 }
-void Fun4AllStreamingInputManager::createQAHistos()
+void Fun4AllStreamingLumiCountingInputManager::createQAHistos()
 {
   auto hm = QAHistManagerDef::getHistoManager();
   assert(hm);
@@ -1558,4 +1583,29 @@ void Fun4AllStreamingInputManager::createQAHistos()
   }
 
 
+}
+
+void Fun4AllStreamingLumiCountingInputManager::SetGL1NegativeWindow(const unsigned int i)
+{
+  m_negative_bco_window = std::max(i, m_negative_bco_window);
+}
+
+void Fun4AllStreamingLumiCountingInputManager::SetGL1PositiveWindow(const unsigned int i)
+{
+  m_positive_bco_window = std::max(i, m_positive_bco_window);
+}
+
+void Fun4AllStreamingLumiCountingInputManager::createLuminosityHistos(){
+    auto hm = QAHistManagerDef::getHistoManager();
+    assert(hm);
+    
+    {
+      auto h = new TH1I("h_LumiBCO", "Lumi BCO", 500, 0, 500);
+      h->GetXaxis()->SetTitle(" Lumi BCO per event");
+      h->SetTitle("Number of BCO matched");
+      hm->registerHisto(h);
+    }
+    
+    // Get the global pointers
+    h_lumibco = dynamic_cast<TH1 *>(hm->getHisto("h_LumiBCO"));
 }
