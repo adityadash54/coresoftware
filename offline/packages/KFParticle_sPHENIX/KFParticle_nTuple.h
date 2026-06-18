@@ -9,6 +9,7 @@
 #include <limits>
 #include <string>  // for string
 #include <vector>
+#include <cstdint>  // fixed width integer types used for BCO counters
 
 class PHCompositeNode;
 class TTree;
@@ -34,6 +35,13 @@ class KFParticle_nTuple : public KFParticle_truthAndDetTools, public KFParticle_
                   const KFParticle &vertex,
                   std::vector<KFParticle> daughters,
                   std::vector<KFParticle> intermediates);
+
+  // pass event-level BCO values from KFParticle_sPHENIX
+  void set_event_bcos(const int64_t this_bco, const int64_t last_bco)
+  {
+    m_event_bco = this_bco;
+    m_last_event_bco = last_bco;
+  }
 
   float calc_secondary_vertex_mass_noPID(std::vector<KFParticle> kfp_daughters);
 
@@ -166,6 +174,8 @@ class KFParticle_nTuple : public KFParticle_truthAndDetTools, public KFParticle_
   float m_calculated_daughter_mass[max_tracks]{0};
   float m_calculated_daughter_ip[max_tracks]{0};
   float m_calculated_daughter_ip_xy[max_tracks]{0};
+  float m_calculated_daughter_PV_dca_sig[max_tracks]{0};
+  float m_calculated_daughter_PV_dca_xy_sig[max_tracks]{0};
   float m_calculated_daughter_ipchi2[max_tracks]{0};
   float m_calculated_daughter_ip_err[max_tracks]{0};
   float m_calculated_daughter_x[max_tracks]{0};
@@ -199,6 +209,8 @@ class KFParticle_nTuple : public KFParticle_truthAndDetTools, public KFParticle_
 
   float m_daughter_dca[99]{0};
   float m_daughter_dca_xy[99]{0};
+  float m_daughter_dca_sig[99]{0};
+  float m_daughter_dca_sig_xy[99]{0};
 
   float m_calculated_vertex_x{-1};
   float m_calculated_vertex_y{-1};
@@ -219,6 +231,8 @@ class KFParticle_nTuple : public KFParticle_truthAndDetTools, public KFParticle_
   int m_runNumber{-1};
   int m_evtNumber{-1};
   int64_t m_bco{-1};
+  uint64_t m_event_bco{0};//current event BCO
+  uint64_t m_last_event_bco{0}; //only keeping this, BCO for the last event
 
   bool m_trigger_info_available{false};
 };

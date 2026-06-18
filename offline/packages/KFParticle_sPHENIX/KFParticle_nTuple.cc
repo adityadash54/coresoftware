@@ -205,6 +205,8 @@ void KFParticle_nTuple::initializeBranches(PHCompositeNode* topNode)
       m_tree->Branch(TString(daughter_number) + "_IPchi2", &m_calculated_daughter_ipchi2[i], TString(daughter_number) + "_IPchi2/F");
       m_tree->Branch(TString(daughter_number) + "_IPErr", &m_calculated_daughter_ip_err[i], TString(daughter_number) + "_IPErr/F");
       m_tree->Branch(TString(daughter_number) + "_IP_xy", &m_calculated_daughter_ip_xy[i], TString(daughter_number) + "_IP_xy/F");
+      m_tree->Branch(TString(daughter_number) + "_DCA_sig", &m_calculated_daughter_PV_dca_sig[i], TString(daughter_number) + "_DCA_sig/F");
+      m_tree->Branch(TString(daughter_number) + "_DCA_sig_xy", &m_calculated_daughter_PV_dca_xy_sig[i], TString(daughter_number) + "_DCA_sig_xy/F");
     }
     if (m_get_all_PVs)
     {
@@ -270,6 +272,14 @@ void KFParticle_nTuple::initializeBranches(PHCompositeNode* topNode)
         std::string dca_branch_name_xy = dca_branch_name + "_xy";
         std::string dca_leaf_name_xy = dca_branch_name_xy + "/F";
         m_tree->Branch(dca_branch_name_xy.c_str(), &m_daughter_dca_xy[iter], dca_leaf_name_xy.c_str());
+        
+        std::string dca_sig_branch_name = "track_" + std::to_string(i + 1) + "_track_" + std::to_string(j + 1) + "_DCA_sig";
+        std::string dca_sig_leaf_name = dca_sig_branch_name + "/F";
+        m_tree->Branch(dca_sig_branch_name.c_str(), &m_daughter_dca_sig[iter], dca_sig_leaf_name.c_str());
+
+        std::string dca_sig_branch_name_xy = dca_sig_branch_name + "_xy";
+        std::string dca_sig_leaf_name_xy = dca_sig_branch_name_xy + "/F";
+        m_tree->Branch(dca_sig_branch_name_xy.c_str(), &m_daughter_dca_sig_xy[iter], dca_sig_leaf_name_xy.c_str());
 
         ++iter;
       }
@@ -303,7 +313,9 @@ void KFParticle_nTuple::initializeBranches(PHCompositeNode* topNode)
 
   m_tree->Branch("runNumber", &m_runNumber, "runNumber/I");
   m_tree->Branch("eventNumber", &m_evtNumber, "eventNumber/I");
-  m_tree->Branch("BCO", &m_bco, "BCO/L");
+  m_tree->Branch("Collision_BCO", &m_bco, "Collision_BCO/L"); //already there, this is shifted BCO
+  m_tree->Branch("GL1_BCO", &m_event_bco, "GL1_BCO/L"); //adding for the current event BCO, not shifted
+  m_tree->Branch("last_GL1_BCO", &m_last_event_bco, "last_GL1_BCO/L"); //BCO for the last event 
 
   if (m_get_trigger_info)
   {
@@ -494,6 +506,8 @@ void KFParticle_nTuple::fillBranch(PHCompositeNode* topNode,
       m_calculated_daughter_ipchi2[i] = daughterArray[i].GetDeviationFromVertex(vertex_fillbranch);
       m_calculated_daughter_ip_err[i] = m_calculated_daughter_ip[i] / std::sqrt(m_calculated_daughter_ipchi2[i]);
       m_calculated_daughter_ip_xy[i] = daughterArray[i].GetDistanceFromVertexXY(vertex_fillbranch);
+      m_calculated_daughter_PV_dca_sig[i] = daughterArray[i].GetDeviationFromVertex(vertex_fillbranch);
+      m_calculated_daughter_PV_dca_xy_sig[i] = daughterArray[i].GetDeviationFromVertexXY(vertex_fillbranch);
     }
     m_calculated_daughter_x[i] = daughterArray[i].GetX();
     m_calculated_daughter_y[i] = daughterArray[i].GetY();
@@ -594,6 +608,8 @@ void KFParticle_nTuple::fillBranch(PHCompositeNode* topNode,
       {
         m_daughter_dca[iter] = daughterArray[i].GetDistanceFromParticle(daughterArray[j]);
         m_daughter_dca_xy[iter] = daughterArray[i].GetDistanceFromParticleXY(daughterArray[j]);
+        m_daughter_dca_sig[iter] = daughterArray[i].GetDeviationFromParticle(daughterArray[j]);
+        m_daughter_dca_sig_xy[iter] = daughterArray[i].GetDeviationFromParticleXY(daughterArray[j]);
         ++iter;
       }
     }
@@ -663,21 +679,38 @@ void KFParticle_nTuple::fillBranch(PHCompositeNode* topNode,
 
   if (evtNode)
   {
-    EventHeader* evtHeader = findNode::getClass<EventHeader>(topNode, "EventHeader");
-    m_runNumber = evtHeader->get_RunNumber();
-    m_evtNumber = evtHeader->get_EvtSequence();
+	  EventHeader* evtHeader = findNode::getClass<EventHeader>(topNode, "EventHeader");
+	  if (evtHeader)
+	  {
+		  m_runNumber = evtHeader->get_RunNumber();
+		  m_evtNumber = evtHeader->get_EvtSequence();
+	  }
+	  else
+	  {
+		  m_runNumber = -1;
+		  m_evtNumber = -1;
+	  }
 
-    auto* gl1packet = findNode::getClass<Gl1Packet>(topNode, "GL1RAWHIT");
-    if (!gl1packet)
-    {
-      gl1packet = findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
-    }
-    m_bco = gl1packet->lValue(0, "BCO") + m_calculated_daughter_bunch_crossing[0];
-    //m_bco = m_trigger_info_available ? gl1packet->lValue(0, "BCO") + m_calculated_daughter_bunch_crossing[0] : 0;
+	  auto* gl1packet = findNode::getClass<Gl1Packet>(topNode, "GL1RAWHIT");
+	  if (!gl1packet)
+	  {
+		  gl1packet = findNode::getClass<Gl1Packet>(topNode, "GL1Packet");
+	  }
+
+	  if (gl1packet)
+	  {
+		  m_bco = gl1packet->lValue(0, "BCO") + m_calculated_daughter_bunch_crossing[0];
+	  }
+	  else
+	  {
+		  m_bco = -1;
+	  }
   }
   else
   {
-    m_runNumber = m_evtNumber = m_bco = -1;
+	  m_runNumber = -1;
+	  m_evtNumber = -1;
+	  m_bco = -1;
   }
 
   if (m_trigger_info_available)

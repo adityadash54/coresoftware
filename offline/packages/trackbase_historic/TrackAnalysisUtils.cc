@@ -1,9 +1,9 @@
 #include "TrackAnalysisUtils.h"
 
-#include <globalvertex/GlobalVertex.h>
+#include "SvtxTrack.h"
+#include "TrackSeed.h"
 
-#include <phool/PHCompositeNode.h>
-#include <phool/getClass.h>
+#include <globalvertex/GlobalVertex.h>
 
 #include <trackbase/ActsGeometry.h>
 #include <trackbase/TpcDefs.h>
@@ -11,8 +11,9 @@
 #include <trackbase/TrkrClusterContainer.h>
 
 #include <g4detectors/PHG4TpcGeomContainer.h>
-#include "SvtxTrack.h"
-#include "TrackSeed.h"
+
+#include <phool/PHCompositeNode.h>
+#include <phool/getClass.h>
 
 #include <cmath>
 
@@ -392,7 +393,7 @@ namespace TrackAnalysisUtils
       {
         // otherwise take the manual calculation for the TPC
         // doing it this way just avoids the bounds check that occurs in the surface class method
-        Acts::Vector3 loct = surf->transform(geometry->geometry().getGeoContext()).inverse() * clusglob_moved;  // global is in mm
+        Acts::Vector3 loct = surf->localToGlobalTransform(geometry->geometry().getGeoContext()).inverse() * clusglob_moved;  // global is in mm
         loct /= Acts::UnitConstants::cm;
 
         loc(0) = loct(0);

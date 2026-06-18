@@ -12,12 +12,14 @@
 
 #include <array>
 #include <vector>
+#include <map>
 #include <string>
 #include <string_view>
 #include <memory>
 
 class TTree;
 class TGraph;
+class TNamed;
 class CDBInterface;
 
 class MbdCalib 
@@ -35,7 +37,9 @@ class MbdCalib
   float get_tq0(const int ipmt) const { return _tqfit_t0mean[ipmt]; }
   float get_t0corr() const { return _t0corrmean; }
   float get_ped(const int ifeech) const { return _pedmean[ifeech]; }
+  float get_pederr(const int ifeech) const { return _pedmeanerr[ifeech]; }
   float get_pedrms(const int ifeech) const { return _pedsigma[ifeech]; }
+  float get_pedrmserr(const int ifeech) const { return _pedsigmaerr[ifeech]; }
   int   get_sampmax(const int ifeech) const { return _sampmax[ifeech]; }
   int   get_status(const int ifeech) const { return _mbdstatus[ifeech]; }
 
@@ -166,6 +170,7 @@ class MbdCalib
   int Write_T0Corr(const std::string& dbfile);
   int Write_Ped(const std::string& dbfile);
   int Write_TimeCorr(const std::string& dbfile);
+  int Write_SlewCorr(const std::string& dbfile);
   int Write_Gains(const std::string& dbfile);
   int Write_Pileup(const std::string& dbfile);
   int Write_Thresholds(const std::string& dbfile);
@@ -183,6 +188,10 @@ class MbdCalib
 
   // void Dump_to_file(const std::string& what = "ALL");
 
+#ifndef ONLINE
+  void Save_CDB_URL();
+#endif
+
   void SetRawDstFlag(const int r) { _rawdstflag = r; }
   void SetFitsOnly(const int f) { _fitsonly = f; }
 
@@ -196,6 +205,7 @@ class MbdCalib
 #ifndef ONLINE
   CDBInterface* _cdb{nullptr};
   recoConsts* _rc{nullptr};
+  std::map<std::string, std::string> _cdb_urls;
 #endif
 
   std::unique_ptr<MbdGeom> _mbdgeom{nullptr};
