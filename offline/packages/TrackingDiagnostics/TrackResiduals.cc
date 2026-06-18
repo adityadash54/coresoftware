@@ -1,4 +1,3 @@
-
 #include "TrackResiduals.h"
 
 #include <trackbase/ClusterErrorPara.h>
@@ -15,6 +14,7 @@
 #include <g4detectors/PHG4CylinderGeomContainer.h>
 #include <g4detectors/PHG4TpcGeom.h>
 #include <g4detectors/PHG4TpcGeomContainer.h>
+
 
 #include <globalvertex/MbdVertex.h>
 #include <globalvertex/MbdVertexMap.h>
@@ -40,6 +40,13 @@
 #include <trackbase_historic/TrackSeed.h>
 #include <trackbase_historic/TrackSeedContainer.h>
 #include <trackbase_historic/TrackSeedHelper.h>
+
+#include <g4eval/SvtxEvalStack.h>
+#include <g4eval/SvtxTrackEval.h>
+
+#include <g4main/PHG4Particle.h>
+#include <g4main/PHG4VtxPoint.h>
+#include <g4main/PHG4TruthInfoContainer.h>
 
 #include <tpc/LaserEventInfo.h>
 
@@ -104,6 +111,12 @@ TrackResiduals::TrackResiduals(const std::string& name)
 {
 }
 
+TrackResiduals::~TrackResiduals()
+{
+  delete m_svtxEvalStack;
+  m_svtxEvalStack = nullptr;
+}
+
 //____________________________________________________________________________..
 int TrackResiduals::InitRun(PHCompositeNode* topNode)
 {
@@ -120,6 +133,13 @@ int TrackResiduals::InitRun(PHCompositeNode* topNode)
 
   auto *se = Fun4AllServer::instance();
   m_runnumber = se->RunNumber();
+    
+  if (!m_svtxEvalStack)
+  {
+    m_svtxEvalStack = new SvtxEvalStack(topNode);
+    m_svtxEvalStack->set_strict(false);
+    m_svtxEvalStack->set_verbosity(Verbosity());
+  }
 
   return Fun4AllReturnCodes::EVENT_OK;
 }
@@ -233,6 +253,12 @@ int TrackResiduals::process_event(PHCompositeNode* topNode)
     std::cout << "Missing node, can't continue" << std::endl;
     return Fun4AllReturnCodes::ABORTEVENT;
   }
+    
+  m_firedTriggers.clear();
+  m_gl1BunchCrossing = std::numeric_limits<uint64_t>::max();
+  m_bco   = std::numeric_limits<uint64_t>::max();
+  m_bcotr = std::numeric_limits<uint64_t>::max();
+    
   auto *gl1 = findNode::getClass<Gl1RawHit>(topNode, "GL1RAWHIT");
   if (gl1)
   {
@@ -243,13 +269,6 @@ int TrackResiduals::process_event(PHCompositeNode* topNode)
   else
   {
     Gl1Packet* gl1PacketInfo = findNode::getClass<Gl1Packet>(topNode, "GL1RAWHIT");
-    if (!gl1PacketInfo)
-    {
-      m_bco = std::numeric_limits<uint64_t>::quiet_NaN();
-      m_bcotr = std::numeric_limits<uint64_t>::quiet_NaN();
-    }
-    m_firedTriggers.clear();
-
     if (gl1PacketInfo)
     {
       m_gl1BunchCrossing = gl1PacketInfo->getBunchNumber();
@@ -317,6 +336,11 @@ int TrackResiduals::process_event(PHCompositeNode* topNode)
     fillClusterTree(clustermap, geometry);
   }
 
+  if (m_svtxEvalStack)
+  {
+    m_svtxEvalStack->next_event(topNode);
+  }
+
   if (m_convertSeeds)
   {
     fillResidualTreeSeeds(topNode);
@@ -324,6 +348,11 @@ int TrackResiduals::process_event(PHCompositeNode* topNode)
   else
   {
     fillResidualTreeKF(topNode);
+  }
+    
+  if (m_doTruthTree)
+  {
+    fillTruthTree(topNode);
   }
 
   if (m_doVertex)
@@ -489,7 +518,10 @@ void TrackResiduals::fillVertexTree(PHCompositeNode* topNode)
       for (auto it = vertex->begin_tracks(); it != vertex->end_tracks(); ++it)
       {
         auto id = *it;
-        auto *track = trackmap->find(id)->second;
+        auto trackit = trackmap->find(id);
+        if (trackit == trackmap->end()) continue;
+        auto *track = trackit->second;
+          
         if (!track)
         {
           continue;
@@ -498,7 +530,7 @@ void TrackResiduals::fillVertexTree(PHCompositeNode* topNode)
         {
           TrkrCluster* cluster = clustermap->findCluster(ckey);
 
-          Acts::Vector3 clusglob = m_globalPositionWrapper.getGlobalPositionDistortionCorrected(key, cluster, track->get_crossing());
+          Acts::Vector3 clusglob = m_globalPositionWrapper.getGlobalPositionDistortionCorrected(ckey, cluster, track->get_crossing());
 
           m_clusgx.push_back(clusglob.x());
           m_clusgy.push_back(clusglob.y());
@@ -659,7 +691,8 @@ void TrackResiduals::fillClusterTree(TrkrClusterContainer* clusters,
         m_sclusgz = glob.z();
         m_sclusgr = r(m_sclusgx, m_sclusgy);
         m_sclusphi = atan2(glob.y(), glob.x());
-        m_scluseta = acos(glob.z() / std::sqrt(square(glob.x()) + square(glob.y()) + square(glob.z())));
+        float theta = acos(glob.z() / sqrt(glob.x()*glob.x() + glob.y()*glob.y() + glob.z()*glob.z()));
+        m_scluseta  = -log(tan(theta / 2.0));
         m_adc = cluster->getAdc();
         m_clusmaxadc = cluster->getMaxAdc();
         m_scluslx = cluster->getLocalX();
@@ -760,6 +793,11 @@ int TrackResiduals::End(PHCompositeNode* /*unused*/)
   {
     m_eventtree->Write();
   }
+  if (m_doTruthTree)
+  {
+    m_truthtree->Write();
+  }
+    
   m_outfile->Close();
 
   return Fun4AllReturnCodes::EVENT_OK;
@@ -1274,6 +1312,8 @@ void TrackResiduals::fillClusterBranchesKF(TrkrDefs::cluskey ckey, SvtxTrack* tr
     // cluster has no corresponding state, set state variables to NaNs
     m_statelx.push_back(std::numeric_limits<float>::quiet_NaN());
     m_statelz.push_back(std::numeric_limits<float>::quiet_NaN());
+    m_stateelx.push_back(std::numeric_limits<float>::quiet_NaN());
+    m_stateelz.push_back(std::numeric_limits<float>::quiet_NaN());
     m_stategx.push_back(std::numeric_limits<float>::quiet_NaN());
     m_stategy.push_back(std::numeric_limits<float>::quiet_NaN());
     m_stategz.push_back(std::numeric_limits<float>::quiet_NaN());
@@ -1607,7 +1647,7 @@ void TrackResiduals::createBranches()
     m_eventtree->Branch("run", &m_runnumber, "m_runnumber/I");
     m_eventtree->Branch("segment", &m_segment, "m_segment/I");
     m_eventtree->Branch("event", &m_event, "m_event/I");
-    m_eventtree->Branch("gl1bco", &m_bco, "m_bco/I");
+    m_eventtree->Branch("gl1bco", &m_bco, "m_bco/l");
     m_eventtree->Branch("nmvtx", &m_nmvtx_all, "m_nmvtx_all/I");
     m_eventtree->Branch("nintt", &m_nintt_all, "m_nintt_all/I");
     m_eventtree->Branch("nhittpc0", &m_ntpc_hits0, "m_ntpc_hits0/I");
@@ -1638,6 +1678,7 @@ void TrackResiduals::createBranches()
   m_failedfits->Branch("tpcseedpz", &m_tpcseedpz, "m_tpcseedpz/F");
   m_failedfits->Branch("tpcseedcharge", &m_tpcseedcharge, "m_tpcseedcharge/I");
   m_failedfits->Branch("dedx", &m_dedx, "m_dedx/F");
+  //m_failedfits->Branch("gflavor", &m_gflavor, "m_gflavor/I");
   m_failedfits->Branch("nmaps", &m_nmaps, "m_nmaps/I");
   m_failedfits->Branch("nintt", &m_nintt, "m_nintt/I");
   m_failedfits->Branch("ntpc", &m_ntpc, "m_ntpc/I");
@@ -1764,15 +1805,20 @@ void TrackResiduals::createBranches()
   m_tree->Branch("tpcseedeta", &m_tpcseedeta, "m_tpcseedeta/F");
   m_tree->Branch("tpcseedcharge", &m_tpcseedcharge, "m_tpcseedcharge/I");
   m_tree->Branch("dedx", &m_dedx, "m_dedx/F");
+  m_tree->Branch("gflavor", &m_gflavor, "m_gflavor/I");
   m_tree->Branch("tracklength", &m_tracklength, "m_tracklength/F");
   m_tree->Branch("px", &m_px, "m_px/F");
   m_tree->Branch("py", &m_py, "m_py/F");
   m_tree->Branch("pz", &m_pz, "m_pz/F");
   m_tree->Branch("pt", &m_pt, "m_pt/F");
+  m_tree->Branch("true_px", &m_true_px, "m_true_px/F");
+  m_tree->Branch("true_py", &m_true_py, "m_true_py/F");
+  m_tree->Branch("true_pz", &m_true_pz, "m_true_pz/F");
   m_tree->Branch("eta", &m_eta, "m_eta/F");
   m_tree->Branch("phi", &m_phi, "m_phi/F");
   m_tree->Branch("deltapt", &m_deltapt, "m_deltapt/F");
   m_tree->Branch("charge", &m_charge, "m_charge/I");
+  m_tree->Branch("chisq", &m_chisq, "m_chisq/F");
   m_tree->Branch("quality", &m_quality, "m_quality/F");
   m_tree->Branch("ndf", &m_ndf, "m_ndf/F");
   m_tree->Branch("nhits", &m_nhits, "m_nhits/I");
@@ -1790,6 +1836,10 @@ void TrackResiduals::createBranches()
   m_tree->Branch("vx", &m_vx, "m_vx/F");
   m_tree->Branch("vy", &m_vy, "m_vy/F");
   m_tree->Branch("vz", &m_vz, "m_vz/F");
+  m_tree->Branch("true_vx", &m_true_vx, "m_true_vx/F");
+  m_tree->Branch("true_vy", &m_true_vy, "m_true_vy/F");
+  m_tree->Branch("true_vz", &m_true_vz, "m_true_vz/F");
+  m_tree->Branch("true_t", &m_true_t, "m_true_t/F");
   m_tree->Branch("vertex_ntracks", &m_vertex_ntracks, "m_vertex_ntracks/I");
   m_tree->Branch("pcax", &m_pcax, "m_pcax/F");
   m_tree->Branch("pcay", &m_pcay, "m_pcay/F");
@@ -1805,6 +1855,11 @@ void TrackResiduals::createBranches()
   m_tree->Branch("Y0", &m_Y0, "m_Y0/F");
   m_tree->Branch("dcaxy", &m_dcaxy, "m_dcaxy/F");
   m_tree->Branch("dcaz", &m_dcaz, "m_dcaz/F");
+  m_tree->Branch("true_dcaxy", &m_true_dcaxy, "m_true_dcaxy/F");
+  m_tree->Branch("true_dcaz", &m_true_dcaz, "m_true_dcaz/F");
+  m_tree->Branch("has_truth_match", &m_has_truth_match, "has_truth_match/I");
+  m_tree->Branch("truth_match_fraction", &m_truth_match_fraction, "truth_match_fraction/F");
+  m_tree->Branch("truth_trackid", &m_truth_trackid, "truth_trackid/I");
 
   m_tree->Branch("cluslayer", &m_cluslayer);
   m_tree->Branch("clusstave", &m_clstave);
@@ -1900,10 +1955,42 @@ void TrackResiduals::createBranches()
     m_tree->Branch("statelzlocderivtheta", &m_statelzlocderivtheta);
     m_tree->Branch("statelzlocderivqop", &m_statelzlocderivqop);
   }
+
+  if(m_doTruthTree){
+    m_truthtree = new TTree("truthtree", "Truth particle tree");
+    m_truthtree->Branch("run", &m_runnumber, "m_runnumber/I");
+    m_truthtree->Branch("segment", &m_segment, "m_segment/I");
+    m_truthtree->Branch("event", &m_event, "m_event/I");
+    m_truthtree->Branch("gtrackid", &m_gtrackid, "m_gtrackid/I");
+    m_truthtree->Branch("gflavor_truth", &m_gflavor_truth, "m_gflavor_truth/I");
+    m_truthtree->Branch("gprimary", &m_gprimary, "m_gprimary/I");
+        
+    m_truthtree->Branch("gpx", &m_gpx, "m_gpx/F");
+    m_truthtree->Branch("gpy", &m_gpy, "m_gpy/F");
+    m_truthtree->Branch("gpz", &m_gpz, "m_gpz/F");
+    m_truthtree->Branch("gpt", &m_gpt, "m_gpt/F");
+    m_truthtree->Branch("geta", &m_geta, "m_geta/F");
+    m_truthtree->Branch("gphi", &m_gphi, "m_gphi/F");
+        
+    m_truthtree->Branch("gvx", &m_gvx, "m_gvx/F");
+    m_truthtree->Branch("gvy", &m_gvy, "m_gvy/F");
+    m_truthtree->Branch("gvz", &m_gvz, "m_gvz/F");
+    m_truthtree->Branch("gvt", &m_gvt, "m_gvt/F");
+        
+    m_truthtree->Branch("gnmaps", &m_gnmaps, "m_gnmaps/I");
+    m_truthtree->Branch("gnintt", &m_gnintt, "m_gnintt/I");
+    m_truthtree->Branch("gntpc", &m_gntpc, "m_gntpc/I");
+    m_truthtree->Branch("gnmms", &m_gnmms, "m_gnmms/I");
+        
+    //m_truthtree->Branch("greconstructable", &m_greconstructable, "m_greconstructable/I");
+    m_truthtree->Branch("gmatched_reco_trackid", &m_gmatched_reco_trackid, "m_gmatched_reco_trackid/I");
+  }
 }
 
 void TrackResiduals::fillResidualTreeKF(PHCompositeNode* topNode)
 {
+  if (Verbosity() > 0) {std::cout << "using fillResidualTreeKF" << std::endl;}
+    
   auto *silseedmap = findNode::getClass<TrackSeedContainer>(topNode, "SiliconTrackSeedContainer");
   auto *tpcseedmap = findNode::getClass<TrackSeedContainer>(topNode, "TpcTrackSeedContainer");
   auto *tpcGeom =
@@ -1921,6 +2008,12 @@ void TrackResiduals::fillResidualTreeKF(PHCompositeNode* topNode)
       continue;
     }
     m_trackid = track->get_id();
+    m_silid         = std::numeric_limits<unsigned int>::max();
+    m_tpcid         = std::numeric_limits<unsigned int>::max();
+    m_silseedcharge = std::numeric_limits<int>::quiet_NaN();
+    m_tpcseedcharge = std::numeric_limits<int>::quiet_NaN();
+    
+    fillTruthMatchBranches(track);
 
     m_crossing = track->get_crossing();
     m_crossing_estimate = SHRT_MAX;
@@ -1969,6 +2062,7 @@ void TrackResiduals::fillResidualTreeKF(PHCompositeNode* topNode)
     m_tpcseedphi = std::numeric_limits<float>::quiet_NaN();
     m_tpcseedeta = std::numeric_limits<float>::quiet_NaN();
     m_tpcseedcharge = std::numeric_limits<int>::quiet_NaN();
+    //m_gflavor = std::numeric_limits<int>::quiet_NaN();
 
     m_pcax = track->get_x();
     m_pcay = track->get_y();
@@ -2135,7 +2229,14 @@ void TrackResiduals::fillResidualTreeKF(PHCompositeNode* topNode)
 
     if (m_nmms > 0 || !m_doMicromegasOnly)
     {
-      m_tree->Fill();
+      if (!m_doMatchedOnly)
+      {
+          m_tree->Fill();
+      }
+      else
+      {
+          m_tree->Fill(); //do we need similar checks as in if (!m_doMatchedOnly) block in fillResidualTreeSeeds?
+      }
     }
 
   }  // end loop over tracks
@@ -2146,7 +2247,9 @@ void TrackResiduals::fillResidualTreeKF(PHCompositeNode* topNode)
   }
 }
 void TrackResiduals::fillEventTree(PHCompositeNode* topNode)
-{
+{ 
+  if (Verbosity() > 0) {std::cout<<"m_trackMapName="<<m_trackMapName<<std::endl;}
+    
   auto *silseedmap = findNode::getClass<TrackSeedContainer>(topNode, "SiliconTrackSeedContainer");
   auto *tpcseedmap = findNode::getClass<TrackSeedContainer>(topNode, "TpcTrackSeedContainer");
   auto *trackmap = findNode::getClass<SvtxTrackMap>(topNode, m_trackMapName);
@@ -2162,7 +2265,7 @@ void TrackResiduals::fillEventTree(PHCompositeNode* topNode)
   m_nmms_all = 0;
   m_nsiseed = 0;
   m_ntpcseed = 0;
-  m_ntpc_clus_sector.resize(24, 0);
+  m_ntpc_clus_sector.assign(24, 0);
   m_nsiseed = silseedmap->size();
   m_ntpcseed = tpcseedmap->size();
   m_ntracks_all = trackmap->size();
@@ -2247,6 +2350,8 @@ void TrackResiduals::fillEventTree(PHCompositeNode* topNode)
 
 void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
 {
+  if (Verbosity() > 0) {std::cout << "using fillResidualTreeSeeds" << std::endl;}
+    
   auto *silseedmap = findNode::getClass<TrackSeedContainer>(topNode, "SiliconTrackSeedContainer");
   auto *tpcseedmap = findNode::getClass<TrackSeedContainer>(topNode, "TpcTrackSeedContainer");
   auto *tpcGeom =
@@ -2267,6 +2372,12 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
       continue;
     }
     m_trackid = track->get_id();
+    m_silid         = std::numeric_limits<unsigned int>::max();
+    m_tpcid         = std::numeric_limits<unsigned int>::max();
+    m_silseedcharge = std::numeric_limits<int>::max();
+    m_tpcseedcharge = std::numeric_limits<int>::max();
+    
+    fillTruthMatchBranches(track);
    
     m_crossing = track->get_crossing();
     m_crossing_estimate = SHRT_MAX;
@@ -2293,9 +2404,13 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
     }
 
     m_nmaps = 0;
+    m_nmapsstate=0;
     m_nintt = 0;
+    m_ninttstate=0;
     m_ntpc = 0;
+    m_ntpcstate=0;
     m_nmms = 0;
+    m_nmmsstate=0;
     m_silid = std::numeric_limits<unsigned int>::quiet_NaN();
     m_tpcid = std::numeric_limits<unsigned int>::quiet_NaN();
     m_silseedx = std::numeric_limits<float>::quiet_NaN();
@@ -2316,6 +2431,7 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
     m_tpcseedphi = std::numeric_limits<float>::quiet_NaN();
     m_tpcseedeta = std::numeric_limits<float>::quiet_NaN();
     m_tpcseedcharge = std::numeric_limits<int>::quiet_NaN();
+    //m_gflavor = std::numeric_limits<int>::quiet_NaN();
 
     m_vertexid = track->get_vertex_id();
 
@@ -2324,6 +2440,9 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
     m_pcaz = track->get_z();
     m_dcaxy = std::numeric_limits<float>::quiet_NaN();
     m_dcaz = std::numeric_limits<float>::quiet_NaN();
+    m_vertex_ntracks  = std::numeric_limits<int>::quiet_NaN();
+    m_vertex_crossing = std::numeric_limits<int>::quiet_NaN();
+      
     if (vertexmap)
     {
       auto vertexit = vertexmap->find(m_vertexid);
@@ -2333,6 +2452,8 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
         m_vx = vertex->get_x();
         m_vy = vertex->get_y();
         m_vz = vertex->get_z();
+        m_vertex_ntracks  = vertex->size_tracks();
+        m_vertex_crossing = vertex->get_beam_crossing();
         Acts::Vector3 vert(m_vx, m_vy, m_vz);
         auto dcapair = TrackAnalysisUtils::get_dca(track, vert);
         m_dcaxy = dcapair.first.first;
@@ -2540,5 +2661,206 @@ void TrackResiduals::fillResidualTreeSeeds(PHCompositeNode* topNode)
         m_tree->Fill();
       }
     }
+  }
+}
+
+void TrackResiduals::fillTruthTree(PHCompositeNode* topNode)
+{
+  auto* truthinfo =
+      findNode::getClass<PHG4TruthInfoContainer>(topNode, "G4TruthInfo");
+
+  if (!truthinfo || !m_svtxEvalStack) return;
+
+  auto* trutheval = m_svtxEvalStack->get_truth_eval();
+  auto* clustereval = m_svtxEvalStack->get_cluster_eval();
+  auto* trackeval = m_svtxEvalStack->get_track_eval();
+
+  if (!trutheval || !clustereval || !trackeval) return;
+
+  auto primary_range = truthinfo->GetPrimaryParticleRange();
+
+  for (auto iter = primary_range.first;
+       iter != primary_range.second;
+       ++iter)
+  {
+    PHG4Particle* truth = iter->second;
+    if (!truth) continue;
+
+    m_gtrackid = truth->get_track_id();
+    m_gflavor_truth = truth->get_pid();
+    m_gprimary = trutheval->is_primary(truth) ? 1 : 0;
+
+    m_gpx = truth->get_px();
+    m_gpy = truth->get_py();
+    m_gpz = truth->get_pz();
+
+    m_gpt = std::sqrt(m_gpx * m_gpx + m_gpy * m_gpy);
+    const float gp = std::sqrt(m_gpx * m_gpx + m_gpy * m_gpy + m_gpz * m_gpz);
+
+    if (gp > 0 && gp != std::fabs(m_gpz))
+    {
+      m_geta = 0.5 * std::log((gp + m_gpz) / (gp - m_gpz));
+    }
+    else
+    {
+      m_geta = std::numeric_limits<float>::quiet_NaN();
+    }
+
+    m_gphi = std::atan2(m_gpy, m_gpx);
+
+    m_gvx = std::numeric_limits<float>::quiet_NaN();
+    m_gvy = std::numeric_limits<float>::quiet_NaN();
+    m_gvz = std::numeric_limits<float>::quiet_NaN();
+    m_gvt = std::numeric_limits<float>::quiet_NaN();
+
+    PHG4VtxPoint* vtx = trutheval->get_vertex(truth);
+    if (vtx)
+    {
+      m_gvx = vtx->get_x();
+      m_gvy = vtx->get_y();
+      m_gvz = vtx->get_z();
+      m_gvt = vtx->get_t();
+    }
+
+    m_gnmaps = 0;
+    m_gnintt = 0;
+    m_gntpc = 0;
+    m_gnmms = 0;
+
+    std::set<TrkrDefs::cluskey> truth_clusters =
+        clustereval->all_clusters_from(truth);
+
+    for (const auto& ckey : truth_clusters)
+    {
+      const unsigned int layer = TrkrDefs::getLayer(ckey);
+
+      if (layer < 3)
+      {
+        ++m_gnmaps;
+      }
+      else if (layer < 7)
+      {
+        ++m_gnintt;
+      }
+      else if (layer < 55)
+      {
+        ++m_gntpc;
+      }
+      else
+      {
+        ++m_gnmms;
+      }
+    }
+
+//    const int apid = std::abs(m_gflavor_truth);
+//    const bool charged =
+//        apid == 11 ||
+//        apid == 13 ||
+//        apid == 211 ||
+//        apid == 321 ||
+//        apid == 2212;
+
+//    m_greconstructable = 0;
+//
+//    if (charged &&
+//        m_gprimary &&
+//        m_gpt > 0.3 &&
+//        std::fabs(m_geta) < 1.1 &&
+//        m_gnmaps >= 3 &&
+//        m_gnintt >= 1 &&
+//        m_gntpc > 32)
+//    {
+//      m_greconstructable = 1;
+//    }
+//
+    m_gmatched_reco_trackid = -1;
+
+    SvtxTrack* best_track = trackeval->best_track_from(truth);
+    if (best_track)
+    {
+      m_gmatched_reco_trackid = best_track->get_id();
+    }
+
+    m_truthtree->Fill();
+  }
+}
+
+void TrackResiduals::fillTruthMatchBranches(SvtxTrack* track)
+{
+  // Reset all truth-match fields to their "no match" sentinels.
+  // Callers must NOT reset these themselves before calling here.
+  m_has_truth_match      = -1;
+  m_truth_match_fraction = -1;
+  m_truth_trackid        = -1;
+  m_gflavor              = std::numeric_limits<int>::max();
+  m_true_px              = std::numeric_limits<float>::quiet_NaN();
+  m_true_py              = std::numeric_limits<float>::quiet_NaN();
+  m_true_pz              = std::numeric_limits<float>::quiet_NaN();
+  m_true_vx              = std::numeric_limits<float>::quiet_NaN();
+  m_true_vy              = std::numeric_limits<float>::quiet_NaN();
+  m_true_vz              = std::numeric_limits<float>::quiet_NaN();
+  m_true_t               = std::numeric_limits<float>::quiet_NaN();
+  m_true_dcaxy           = std::numeric_limits<float>::quiet_NaN();
+  m_true_dcaz            = std::numeric_limits<float>::quiet_NaN();
+
+  if (!m_svtxEvalStack)
+  {
+    return;  // eval stack not available (e.g. running on real data)
+  }
+
+  auto* trackeval = m_svtxEvalStack->get_track_eval();
+  auto* trutheval = m_svtxEvalStack->get_truth_eval();
+
+  if (!trackeval || !trutheval)
+  {
+    return;
+  }
+
+  // Find the G4 particle that contributed the most clusters to this reco track.
+  PHG4Particle* truth = trackeval->max_truth_particle_by_nclusters(track);
+  if (!truth)
+  {
+    return;  // no matched particle — all fields stay at sentinels
+  }
+
+  // A matched G4 particle was found.
+  // has_truth_match = 1 means momentum and PID fields (true_px/py/pz, gflavor,
+  // truth_trackid) are valid. It does NOT guarantee vertex fields are valid —
+  // true_vx/vy/vz/t and true_dcaxy/dcaz are NaN when the vertex lookup fails,
+  // which can occur legitimately for secondaries or in embedding jobs.
+  m_has_truth_match = 1;
+  m_truth_trackid   = truth->get_track_id();
+  m_gflavor         = truth->get_pid();
+  m_true_px         = truth->get_px();
+  m_true_py         = truth->get_py();
+  m_true_pz         = truth->get_pz();
+
+  // Vertex lookup — may legitimately fail for secondaries or in embedding jobs.
+  PHG4VtxPoint* vtx = trutheval->get_vertex(truth);
+  if (vtx)
+  {
+    // Vertex found: spatial and DCA fields are now valid.
+    m_true_vx       = vtx->get_x();
+    m_true_vy       = vtx->get_y();
+    m_true_vz       = vtx->get_z();
+    m_true_t        = vtx->get_t();
+
+    Acts::Vector3 truth_vtx(m_true_vx, m_true_vy, m_true_vz);
+    auto dca_true = TrackAnalysisUtils::get_dca(track, truth_vtx);
+    m_true_dcaxy  = dca_true.first.first;
+    m_true_dcaz   = dca_true.second.first;
+  }
+
+  // Cluster match fraction.
+  const int nclusters_truth = trackeval->get_nclusters_contribution(track, truth);
+  const int nclusters_reco  = (int) get_cluster_keys(track).size();
+
+  if (nclusters_reco > 0)
+  {
+    m_truth_match_fraction = (float)nclusters_truth / (float)nclusters_reco;
+  }
+  else
+  {
+    m_truth_match_fraction = -1;  // truth particle found but track has no clusters
   }
 }

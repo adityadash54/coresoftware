@@ -30,12 +30,14 @@ class TrkrHitSetContainer;
 class PHG4TpcGeomContainer;
 class PHG4CylinderGeomContainer;
 class TpcDistortionCorrectionContainer;
+class SvtxEvalStack;
+class PHG4Particle;
 class TrackResiduals : public SubsysReco
 {
  public:
   TrackResiduals(const std::string &name = "TrackResiduals");
 
-  ~TrackResiduals() override = default;
+  ~TrackResiduals() override;
 
   int InitRun(PHCompositeNode *topNode) override;
   int process_event(PHCompositeNode *topNode) override;
@@ -49,6 +51,7 @@ class TrackResiduals : public SubsysReco
   void hitTree() { m_doHits = true; }
   void eventTree() { m_doEventTree = true; }
   void MatchedTracksOnly() { m_doMatchedOnly = true; }
+  void truthTree() { m_doTruthTree = true; }
   void ppmode() { m_ppmode = true; }
   void convertSeeds(bool flag) { m_convertSeeds = flag; }
   void dropClustersNoState(bool flag) { m_dropClustersNoState = flag; }
@@ -84,12 +87,14 @@ class TrackResiduals : public SubsysReco
   void fillClusterBranchesSeeds(TrkrDefs::cluskey ckey,  // SvtxTrack* track,
                                 const std::vector<std::pair<TrkrDefs::cluskey, Acts::Vector3>> &global,
                                 PHCompositeNode *topNode);
+  void fillTruthTree(PHCompositeNode *topNode);
   void lineFitClusters(std::vector<TrkrDefs::cluskey> &keys, TrkrClusterContainer *clusters, const short int &crossing);
   void circleFitClusters(std::vector<TrkrDefs::cluskey> &keys, TrkrClusterContainer *clusters, const short int &crossing);
   void fillStatesWithCircleFit(const TrkrDefs::cluskey &key, TrkrCluster *cluster,
                                Acts::Vector3 &glob, ActsGeometry *geometry);
   void fillVertexTree(PHCompositeNode *topNode);
   void fillFailedSeedTree(PHCompositeNode *topNode, std::set<unsigned int> &tpc_seed_ids);
+  void fillTruthMatchBranches(SvtxTrack* track);
 
   bool m_use_clustermover = true;
 
@@ -101,6 +106,7 @@ class TrackResiduals : public SubsysReco
   TTree *m_hittree = nullptr;
   TTree *m_vertextree = nullptr;
   TTree *m_failedfits = nullptr;
+  TTree* m_truthtree = nullptr;
 
   bool m_doVertex = false;
   bool m_doClusters = false;
@@ -109,9 +115,12 @@ class TrackResiduals : public SubsysReco
   bool m_zeroField = false;
   bool m_doFailedSeeds = false;
   bool m_doMatchedOnly = false;
+  bool m_doTruthTree = false;
 
   TpcClusterMover m_clusterMover;
   TpcGlobalPositionWrapper m_globalPositionWrapper;
+    
+  SvtxEvalStack* m_svtxEvalStack = nullptr;
 
   ClusterErrorPara m_clusErrPara;
   std::string m_alignmentMapName = "SvtxAlignmentStateMap";
@@ -128,34 +137,34 @@ class TrackResiduals : public SubsysReco
   bool m_doMicromegasOnly = false;
 
   int m_event = 0;
-  int m_segment = std::numeric_limits<int>::quiet_NaN();
-  int m_runnumber = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpcclus = std::numeric_limits<int>::quiet_NaN();
+  int m_segment = std::numeric_limits<int>::max();
+  int m_runnumber = std::numeric_limits<int>::max();
+  int m_ntpcclus = std::numeric_limits<int>::max();
   float m_totalmbd = std::numeric_limits<float>::quiet_NaN();
   std::vector<int> m_firedTriggers;
-  uint64_t m_gl1BunchCrossing = std::numeric_limits<uint64_t>::quiet_NaN();
+  uint64_t m_gl1BunchCrossing = std::numeric_limits<int>::max();
 
   //! Event level quantities
-  int m_nmvtx_all = std::numeric_limits<int>::quiet_NaN();
-  int m_nintt_all = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpc_hits0 = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpc_hits1 = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpc_clus0 = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpc_clus1 = std::numeric_limits<int>::quiet_NaN();
-  int m_nmms_all = std::numeric_limits<int>::quiet_NaN();
-  int m_nsiseed = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpcseed = std::numeric_limits<int>::quiet_NaN();
-  int m_ntracks_all = std::numeric_limits<int>::quiet_NaN();
+  int m_nmvtx_all = std::numeric_limits<int>::max();
+  int m_nintt_all = std::numeric_limits<int>::max();
+  int m_ntpc_hits0 = std::numeric_limits<int>::max();
+  int m_ntpc_hits1 = std::numeric_limits<int>::max();
+  int m_ntpc_clus0 = std::numeric_limits<int>::max();
+  int m_ntpc_clus1 = std::numeric_limits<int>::max();
+  int m_nmms_all = std::numeric_limits<int>::max();
+  int m_nsiseed = std::numeric_limits<int>::max();
+  int m_ntpcseed = std::numeric_limits<int>::max();
+  int m_ntracks_all = std::numeric_limits<int>::max();
   std::vector<int> m_ntpc_clus_sector;
 
   //! Track level quantities
-  uint64_t m_bco = std::numeric_limits<uint64_t>::quiet_NaN();
-  uint64_t m_bcotr = std::numeric_limits<uint64_t>::quiet_NaN();
-  unsigned int m_trackid = std::numeric_limits<unsigned int>::quiet_NaN();
-  int m_crossing = std::numeric_limits<int>::quiet_NaN();
-  int m_crossing_estimate = std::numeric_limits<int>::quiet_NaN();
-  unsigned int m_tpcid = std::numeric_limits<unsigned int>::quiet_NaN();
-  unsigned int m_silid = std::numeric_limits<unsigned int>::quiet_NaN();
+  uint64_t m_bco = std::numeric_limits<uint64_t>::max();
+  uint64_t m_bcotr = std::numeric_limits<uint64_t>::max();
+  unsigned int m_trackid = std::numeric_limits<unsigned int>::max();
+  int m_crossing = std::numeric_limits<int>::max();
+  int m_crossing_estimate = std::numeric_limits<int>::max();
+  unsigned int m_tpcid = std::numeric_limits<unsigned int>::max();
+  unsigned int m_silid = std::numeric_limits<unsigned int>::max();
   float m_px = std::numeric_limits<float>::quiet_NaN();
   float m_py = std::numeric_limits<float>::quiet_NaN();
   float m_pz = std::numeric_limits<float>::quiet_NaN();
@@ -163,25 +172,25 @@ class TrackResiduals : public SubsysReco
   float m_eta = std::numeric_limits<float>::quiet_NaN();
   float m_phi = std::numeric_limits<float>::quiet_NaN();
   float m_deltapt = std::numeric_limits<float>::quiet_NaN();
-  int m_charge = std::numeric_limits<int>::quiet_NaN();
+  int m_charge = std::numeric_limits<int>::max();
   float m_quality = std::numeric_limits<float>::quiet_NaN();
   float m_chisq = std::numeric_limits<float>::quiet_NaN();
   float m_ndf = std::numeric_limits<float>::quiet_NaN();
-  int m_nhits = std::numeric_limits<int>::quiet_NaN();
-  int m_nmaps = std::numeric_limits<int>::quiet_NaN();
-  int m_nmapsstate = std::numeric_limits<int>::quiet_NaN();
-  int m_nintt = std::numeric_limits<int>::quiet_NaN();
-  int m_ninttstate = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpc = std::numeric_limits<int>::quiet_NaN();
-  int m_ntpcstate = std::numeric_limits<int>::quiet_NaN();
-  int m_nmms = std::numeric_limits<int>::quiet_NaN();
-  int m_nmmsstate = std::numeric_limits<int>::quiet_NaN();
-  unsigned int m_vertexid = std::numeric_limits<unsigned int>::quiet_NaN();
-  int m_vertex_crossing = std::numeric_limits<int>::quiet_NaN();
+  int m_nhits = std::numeric_limits<int>::max();
+  int m_nmaps = std::numeric_limits<int>::max();
+  int m_nmapsstate = std::numeric_limits<int>::max();
+  int m_nintt = std::numeric_limits<int>::max();
+  int m_ninttstate = std::numeric_limits<int>::max();
+  int m_ntpc = std::numeric_limits<int>::max();
+  int m_ntpcstate = std::numeric_limits<int>::max();
+  int m_nmms = std::numeric_limits<int>::max();
+  int m_nmmsstate = std::numeric_limits<int>::max();
+  unsigned int m_vertexid = std::numeric_limits<unsigned int>::max();
+  int m_vertex_crossing = std::numeric_limits<int>::max();
   float m_vx = std::numeric_limits<float>::quiet_NaN();
   float m_vy = std::numeric_limits<float>::quiet_NaN();
   float m_vz = std::numeric_limits<float>::quiet_NaN();
-  int m_vertex_ntracks = std::numeric_limits<int>::quiet_NaN();
+  int m_vertex_ntracks = std::numeric_limits<int>::max();
   float m_pcax = std::numeric_limits<float>::quiet_NaN();
   float m_pcay = std::numeric_limits<float>::quiet_NaN();
   float m_pcaz = std::numeric_limits<float>::quiet_NaN();
@@ -197,15 +206,17 @@ class TrackResiduals : public SubsysReco
   float m_dcaxy = std::numeric_limits<float>::quiet_NaN();
   float m_dcaz = std::numeric_limits<float>::quiet_NaN();
   float m_tracklength = std::numeric_limits<float>::quiet_NaN();
+  float m_true_dcaxy = std::numeric_limits<float>::quiet_NaN();
+  float m_true_dcaz = std::numeric_limits<float>::quiet_NaN();
   
-  int m_silseedit = std::numeric_limits<int>::quiet_NaN();
+  int m_silseedit = std::numeric_limits<int>::max();
   float m_silseedx = std::numeric_limits<float>::quiet_NaN();
   float m_silseedy = std::numeric_limits<float>::quiet_NaN();
   float m_silseedz = std::numeric_limits<float>::quiet_NaN();
   float m_silseedpx = std::numeric_limits<float>::quiet_NaN();
   float m_silseedpy = std::numeric_limits<float>::quiet_NaN();
   float m_silseedpz = std::numeric_limits<float>::quiet_NaN();
-  int m_silseedcharge = std::numeric_limits<int>::quiet_NaN();
+  int m_silseedcharge = std::numeric_limits<int>::max();
   float m_silseedphi = std::numeric_limits<float>::quiet_NaN();
   float m_silseedeta = std::numeric_limits<float>::quiet_NaN();
   float m_tpcseedx = std::numeric_limits<float>::quiet_NaN();
@@ -214,31 +225,70 @@ class TrackResiduals : public SubsysReco
   float m_tpcseedpx = std::numeric_limits<float>::quiet_NaN();
   float m_tpcseedpy = std::numeric_limits<float>::quiet_NaN();
   float m_tpcseedpz = std::numeric_limits<float>::quiet_NaN();
-  int m_tpcseedcharge = std::numeric_limits<int>::quiet_NaN();
+  int m_tpcseedcharge = std::numeric_limits<int>::max();
   float m_tpcseedphi = std::numeric_limits<float>::quiet_NaN();
   float m_tpcseedeta = std::numeric_limits<float>::quiet_NaN();
-  int m_tpcseedit = std::numeric_limits<int>::quiet_NaN();
+  int m_tpcseedit = std::numeric_limits<int>::max();
   
   float m_dedx = std::numeric_limits<float>::quiet_NaN();
+  int m_gflavor = std::numeric_limits<int>::max();
+    
+  int m_has_truth_match = -1;
+  float m_truth_match_fraction = -1;
+  int m_truth_trackid = -1;
+    
+  ///Truth track level quantitites
+  int m_gtrackid = std::numeric_limits<int>::max();
+  int m_gflavor_truth = std::numeric_limits<int>::max();
+  int m_gprimary = std::numeric_limits<int>::max();
+
+  float m_gpx = std::numeric_limits<float>::quiet_NaN();
+  float m_gpy = std::numeric_limits<float>::quiet_NaN();
+  float m_gpz = std::numeric_limits<float>::quiet_NaN();
+  float m_gpt = std::numeric_limits<float>::quiet_NaN();
+  float m_geta = std::numeric_limits<float>::quiet_NaN();
+  float m_gphi = std::numeric_limits<float>::quiet_NaN();
+
+  float m_gvx = std::numeric_limits<float>::quiet_NaN();
+  float m_gvy = std::numeric_limits<float>::quiet_NaN();
+  float m_gvz = std::numeric_limits<float>::quiet_NaN();
+  float m_gvt = std::numeric_limits<float>::quiet_NaN();
+
+  int m_gnmaps = std::numeric_limits<int>::max();
+  int m_gnintt = std::numeric_limits<int>::max();
+  int m_gntpc = std::numeric_limits<int>::max();
+  int m_gnmms = std::numeric_limits<int>::max();
+    
+  float m_true_vx = std::numeric_limits<float>::quiet_NaN();
+  float m_true_vy = std::numeric_limits<float>::quiet_NaN();
+  float m_true_vz = std::numeric_limits<float>::quiet_NaN();
+    
+  float m_true_px = std::numeric_limits<float>::quiet_NaN();
+  float m_true_py = std::numeric_limits<float>::quiet_NaN();
+  float m_true_pz = std::numeric_limits<float>::quiet_NaN();
+  float m_true_t = std::numeric_limits<float>::quiet_NaN();
+  
+  //int m_greconstructable = 0;
+  int m_gmatched_reco_trackid = -1;
 
   //! hit tree info
-  uint32_t m_hitsetkey = std::numeric_limits<uint32_t>::quiet_NaN();
+  uint32_t m_hitsetkey = std::numeric_limits<uint32_t>::max();
   float m_hitgx = std::numeric_limits<float>::quiet_NaN();
   float m_hitgy = std::numeric_limits<float>::quiet_NaN();
   float m_hitgz = std::numeric_limits<float>::quiet_NaN();
-  int m_hitlayer = std::numeric_limits<int>::quiet_NaN();
-  int m_sector = std::numeric_limits<int>::quiet_NaN();
-  int m_hitpad = std::numeric_limits<int>::quiet_NaN();
-  int m_hittbin = std::numeric_limits<int>::quiet_NaN();
-  int m_col = std::numeric_limits<int>::quiet_NaN();
-  int m_row = std::numeric_limits<int>::quiet_NaN();
-  int m_strip = std::numeric_limits<int>::quiet_NaN();
+  int m_hitlayer = std::numeric_limits<int>::max();
+  int m_sector = std::numeric_limits<int>::max();
+  int m_hitpad = std::numeric_limits<int>::max();
+  int m_hittbin = std::numeric_limits<int>::max();
+  int m_col = std::numeric_limits<int>::max();
+  int m_row = std::numeric_limits<int>::max();
+  int m_strip = std::numeric_limits<int>::max();
   float m_zdriftlength = std::numeric_limits<float>::quiet_NaN();
   
   float m_mbdvtxz = std::numeric_limits<float>::quiet_NaN();
 
-  int m_ntracks = std::numeric_limits<int>::quiet_NaN();
-  int m_nvertices = std::numeric_limits<int>::quiet_NaN();
+  int m_ntracks = std::numeric_limits<int>::max();
+  int m_nvertices = std::numeric_limits<int>::max();
 
   //! cluster tree info
   float m_sclusgr = std::numeric_limits<float>::quiet_NaN();
@@ -246,26 +296,26 @@ class TrackResiduals : public SubsysReco
   float m_scluseta = std::numeric_limits<float>::quiet_NaN();
   float m_adc = std::numeric_limits<float>::quiet_NaN();
   float m_clusmaxadc = std::numeric_limits<float>::quiet_NaN();
-  int m_phisize = std::numeric_limits<int>::quiet_NaN();
-  int m_zsize = std::numeric_limits<int>::quiet_NaN();
+  int m_phisize = std::numeric_limits<int>::max();
+  int m_zsize = std::numeric_limits<int>::max();
   float m_scluslx = std::numeric_limits<float>::quiet_NaN();
   float m_scluslz = std::numeric_limits<float>::quiet_NaN();
   float m_sclusgx = std::numeric_limits<float>::quiet_NaN();
   float m_sclusgy = std::numeric_limits<float>::quiet_NaN();
   float m_sclusgz = std::numeric_limits<float>::quiet_NaN();
-  int m_scluslayer = std::numeric_limits<int>::quiet_NaN();
+  int m_scluslayer = std::numeric_limits<int>::max();
   float m_scluselx = std::numeric_limits<float>::quiet_NaN();
   float m_scluselz = std::numeric_limits<float>::quiet_NaN();
-  int m_clussector = std::numeric_limits<int>::quiet_NaN();
-  int m_side = std::numeric_limits<int>::quiet_NaN();
-  int m_staveid = std::numeric_limits<int>::quiet_NaN();
-  int m_chipid = std::numeric_limits<int>::quiet_NaN();
-  int m_strobeid = std::numeric_limits<int>::quiet_NaN();
-  int m_ladderzid = std::numeric_limits<int>::quiet_NaN();
-  int m_ladderphiid = std::numeric_limits<int>::quiet_NaN();
-  int m_timebucket = std::numeric_limits<int>::quiet_NaN();
-  int m_segtype = std::numeric_limits<int>::quiet_NaN();
-  int m_tileid = std::numeric_limits<int>::quiet_NaN();
+  int m_clussector = std::numeric_limits<int>::max();
+  int m_side = std::numeric_limits<int>::max();
+  int m_staveid = std::numeric_limits<int>::max();
+  int m_chipid = std::numeric_limits<int>::max();
+  int m_strobeid = std::numeric_limits<int>::max();
+  int m_ladderzid = std::numeric_limits<int>::max();
+  int m_ladderphiid = std::numeric_limits<int>::max();
+  int m_timebucket = std::numeric_limits<int>::max();
+  int m_segtype = std::numeric_limits<int>::max();
+  int m_tileid = std::numeric_limits<int>::max();
 
   //! clusters on track information
   std::vector<float> m_clusAdc;
