@@ -19,6 +19,8 @@
 #include <trackbase_historic/SvtxTrackState.h>
 #include <trackbase_historic/TrackAnalysisUtils.h>
 
+#include <globalvertex/SvtxVertexMap.h>
+
 #include <trackreco/ActsPropagator.h>
 
 #include <g4detectors/PHG4TpcGeom.h>
@@ -39,6 +41,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -140,12 +143,6 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     std::cout << "state map size " << _state_map->size() << std::endl;
   }
 
-  Acts::Vector3 eventVertex = Acts::Vector3::Zero();
-  if (m_useEventVertex)
-  {
-    eventVertex = getEventVertex();
-  }
-
   ActsPropagator propagator(_tGeometry);
 
   for (auto [key, statevec] : *_state_map)
@@ -178,16 +175,23 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     }
     addTrackToMilleFile(statevec);
 
-    //! Only take tracks that have 2 mm within event vertex
-    if (m_useEventVertex &&
-        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
-        std::abs(track->get_x()) < 0.2 &&
-        std::abs(track->get_y()) < 0.2)
+    Acts::Vector3 eventVertex = Acts::Vector3::Zero();
+    bool hasMatchingVertex = false;
+    if (m_useEventVertex)
     {
-      //! set x and y to 0 since we are constraining to the x-y origin
-      //! and add constraints to pede later
-      eventVertex(0) = 0;
-      eventVertex(1) = 0;
+      eventVertex = getEventVertex(track);
+      hasMatchingVertex = std::isfinite(eventVertex.z());
+    }
+
+    //! Only take tracks that have 2 mm within event vertex
+    if (m_useEventVertex && hasMatchingVertex &&
+        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
+        std::abs(track->get_x() - eventVertex.x()) < 0.2 &&
+        std::abs(track->get_y() - eventVertex.y()) < 0.2)
+    {
+      //! Retain the reconstructed transverse vertex coordinates.
+      // eventVertex(0) = 0;
+      // eventVertex(1) = 0;
 
       auto dcapair = TrackAnalysisUtils::get_dca(track, eventVertex);
       Acts::Vector2 vtx_residual(-dcapair.first.first, -dcapair.second.first);
@@ -278,6 +282,13 @@ int MakeMilleFiles::GetNodes(PHCompositeNode* topNode)
         << "\t" << m_track_map_name << "\n"
         << "\tAborting\n"
         << std::endl;
+    return Fun4AllReturnCodes::ABORTEVENT;
+  }
+
+  m_vertex_map = findNode::getClass<SvtxVertexMap>(topNode, "SvtxVertexMap");
+  if (m_useEventVertex && !m_vertex_map)
+  {
+    std::cout << PHWHERE << " ERROR: Can't find node SvtxVertexMap" << std::endl;
     return Fun4AllReturnCodes::ABORTEVENT;
   }
 
@@ -437,39 +448,27 @@ Acts::Vector3 MakeMilleFiles::localToGlobalVertex(SvtxTrack* track,
 
   return pos_R;
 }
-
-Acts::Vector3 MakeMilleFiles::getEventVertex()
+Acts::Vector3 MakeMilleFiles::getEventVertex(const SvtxTrack* track) const
 {
-  /**
-   * Returns event vertex in cm as averaged track positions
-   */
-  float xsum = 0;
-  float ysum = 0;
-  float zsum = 0;
-  int nacceptedtracks = 0;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
 
-  for (auto [key, statevec] : *_state_map)
+  if (!track || !m_vertex_map)
   {
-    // Check if track was removed from cleaner
-    auto iter = _track_map->find(key);
-    if (iter == _track_map->end())
-    {
-      continue;
-    }
-
-    SvtxTrack* track = iter->second;
-
-    /// The track vertex is given by the fit as the PCA to the beamline
-    xsum += track->get_x();
-    ysum += track->get_y();
-    zsum += track->get_z();
-
-    nacceptedtracks++;
+    return Acts::Vector3::Constant(nan);
   }
 
-  return Acts::Vector3(xsum / nacceptedtracks,
-                       ysum / nacceptedtracks,
-                       zsum / nacceptedtracks);
+  const SvtxVertex* vertex =
+      m_vertex_map->get(track->get_vertex_id());
+  if (!vertex ||
+      vertex->get_beam_crossing() != track->get_crossing())
+  {
+    return Acts::Vector3::Constant(nan);
+  }
+
+  return Acts::Vector3(
+      vertex->get_x(),
+      vertex->get_y(),
+      vertex->get_z());
 }
 
 void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec)
@@ -758,5 +757,3 @@ bool MakeMilleFiles::is_tpc_sector_fixed(unsigned int layer, unsigned int sector
 
   return ret;
 }
-
-

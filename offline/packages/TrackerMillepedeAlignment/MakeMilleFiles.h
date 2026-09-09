@@ -31,6 +31,7 @@ class PHCompositeNode;
 class PHG4TpcGeomContainer;
 class SvtxTrack;
 class SvtxTrackMap;
+class SvtxVertexMap;
 class TrkrCluster;
 class TrkrClusterContainer;
 class Mille;
@@ -95,7 +96,7 @@ class MakeMilleFiles : public SubsysReco
   Mille* _mille;
 
   int GetNodes(PHCompositeNode* topNode);
-  Acts::Vector3 getEventVertex();
+  Acts::Vector3 getEventVertex(const SvtxTrack* track) const;
 
   bool is_layer_fixed(unsigned int layer);
 
@@ -120,7 +121,7 @@ class MakeMilleFiles : public SubsysReco
   std::string data_outfilename = ("mille_output_data_file.bin");
   std::string steering_outfilename = ("steer.txt");
 
-  bool m_useEventVertex = false;
+  bool m_useEventVertex = true;
   bool _binary = true;
   float m_minPt = 0.0;
 
@@ -145,6 +146,8 @@ class MakeMilleFiles : public SubsysReco
 
   std::string m_track_map_name{"SvtxTrackMap"};
   SvtxTrackMap* _track_map{nullptr};
+
+  SvtxVertexMap* m_vertex_map{nullptr};
 
   std::string m_state_map_name{"SvtxAlignmentStateMap"};
   SvtxAlignmentStateMap* _state_map{nullptr};
