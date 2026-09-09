@@ -19,6 +19,8 @@
 #include <trackbase_historic/SvtxTrackState.h>
 #include <trackbase_historic/TrackAnalysisUtils.h>
 
+#include <globalvertex/SvtxVertexMap.h>
+
 #include <trackreco/ActsPropagator.h>
 
 #include <g4detectors/PHG4TpcGeom.h>
@@ -39,6 +41,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -47,7 +50,7 @@ namespace
 {
   /// square
   template <class T>
-  constexpr T square(const T& x)
+  inline constexpr T square(const T& x)
   {
     return x * x;
   }
@@ -98,7 +101,7 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
     m_ntuple = new TNtuple (
       "ntp", "ntp",
       "layer:stave:chip:residualX:residualY:clusphi:xglob:yglob:zglob:"
-      "errX:errY:"
+      "errX:errY:l0:l1:phi:theta:qoverp:time:"
       "dXdR:dXdZ0:dXdphi:dXdtheta:dXdqoverp:dXdt:"
       "dXdalpha:dXdbeta:dXdgamma:dXdx:dXdy:dXdz:"
       "dYdR:dYdZ0:dYdphi:dYdtheta:dYdqoverp:dYdt:"
@@ -140,12 +143,6 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     std::cout << "state map size " << _state_map->size() << std::endl;
   }
 
-  Acts::Vector3 eventVertex = Acts::Vector3::Zero();
-  if (m_useEventVertex)
-  {
-    eventVertex = getEventVertex();
-  }
-
   ActsPropagator propagator(_tGeometry);
 
   for (auto [key, statevec] : *_state_map)
@@ -178,16 +175,23 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     }
     addTrackToMilleFile(statevec);
 
-    //! Only take tracks that have 2 mm within event vertex
-    if (m_useEventVertex &&
-        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
-        std::abs(track->get_x()) < 0.2 &&
-        std::abs(track->get_y()) < 0.2)
+    Acts::Vector3 eventVertex = Acts::Vector3::Zero();
+    bool hasMatchingVertex = false;
+    if (m_useEventVertex)
     {
-      //! set x and y to 0 since we are constraining to the x-y origin
-      //! and add constraints to pede later
-      eventVertex(0) = 0;
-      eventVertex(1) = 0;
+      eventVertex = getEventVertex(track);
+      hasMatchingVertex = std::isfinite(eventVertex.z());
+    }
+
+    //! Only take tracks that have 2 mm within event vertex
+    if (m_useEventVertex && hasMatchingVertex &&
+        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
+        std::abs(track->get_x() - eventVertex.x()) < 0.2 &&
+        std::abs(track->get_y() - eventVertex.y()) < 0.2)
+    {
+      //! Retain the reconstructed transverse vertex coordinates.
+      // eventVertex(0) = 0;
+      // eventVertex(1) = 0;
 
       auto dcapair = TrackAnalysisUtils::get_dca(track, eventVertex);
       Acts::Vector2 vtx_residual(-dcapair.first.first, -dcapair.second.first);
@@ -281,6 +285,13 @@ int MakeMilleFiles::GetNodes(PHCompositeNode* topNode)
     return Fun4AllReturnCodes::ABORTEVENT;
   }
 
+  m_vertex_map = findNode::getClass<SvtxVertexMap>(topNode, "SvtxVertexMap");
+  if (m_useEventVertex && !m_vertex_map)
+  {
+    std::cout << PHWHERE << " ERROR: Can't find node SvtxVertexMap" << std::endl;
+    return Fun4AllReturnCodes::ABORTEVENT;
+  }
+
   _tGeometry = findNode::getClass<ActsGeometry>(topNode, "ActsGeometry");
   if (!_tGeometry)
   {
@@ -315,7 +326,7 @@ bool MakeMilleFiles::getLocalVtxDerivativesXY(SvtxTrack* track,
   auto* firststate = (*std::next(track->begin_states(), 1)).second;
 
   const auto ckey = firststate->get_cluskey();
-  auto *const cluster = _cluster_map->findCluster(ckey);
+  const auto cluster = _cluster_map->findCluster(ckey);
   const auto surf = _tGeometry->maps().getSurface(ckey, cluster);
 
   const auto param = propagator.makeTrackParams(firststate, track->get_charge(), surf).value();
@@ -437,44 +448,32 @@ Acts::Vector3 MakeMilleFiles::localToGlobalVertex(SvtxTrack* track,
 
   return pos_R;
 }
-
-Acts::Vector3 MakeMilleFiles::getEventVertex()
+Acts::Vector3 MakeMilleFiles::getEventVertex(const SvtxTrack* track) const
 {
-  /**
-   * Returns event vertex in cm as averaged track positions
-   */
-  float xsum = 0;
-  float ysum = 0;
-  float zsum = 0;
-  int nacceptedtracks = 0;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
 
-  for (const auto& [key, statevec] : *_state_map)
+  if (!track || !m_vertex_map)
   {
-    // Check if track was removed from cleaner
-    auto iter = _track_map->find(key);
-    if (iter == _track_map->end())
-    {
-      continue;
-    }
-
-    SvtxTrack* track = iter->second;
-
-    /// The track vertex is given by the fit as the PCA to the beamline
-    xsum += track->get_x();
-    ysum += track->get_y();
-    zsum += track->get_z();
-
-    nacceptedtracks++;
+    return Acts::Vector3::Constant(nan);
   }
 
-  return Acts::Vector3(xsum / nacceptedtracks,
-                       ysum / nacceptedtracks,
-                       zsum / nacceptedtracks);
+  const SvtxVertex* vertex =
+      m_vertex_map->get(track->get_vertex_id());
+  if (!vertex ||
+      vertex->get_beam_crossing() != track->get_crossing())
+  {
+    return Acts::Vector3::Constant(nan);
+  }
+
+  return Acts::Vector3(
+      vertex->get_x(),
+      vertex->get_y(),
+      vertex->get_z());
 }
 
 void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec)
 {
-  for (auto *state : statevec)
+  for (auto state : statevec)
   {
     TrkrDefs::cluskey ckey = state->get_cluster_key();
 
@@ -502,9 +501,8 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
         stave = InttDefs::getLadderZId(ckey);
         chip = InttDefs::getLadderPhiId(ckey);
       }
-    if(m_ignore_tpc && trkrid == TrkrDefs::tpcId) {
+    if(m_ignore_tpc && trkrid == TrkrDefs::tpcId)
       continue;
-}
     const SvtxAlignmentState::ResidualVector residual = state->get_residual();// / Acts::UnitConstants::cm;
     //auto acts_pars = state->parameters();
     //std::cout<<"acts_par(0): "<<acts_pars(0)<<std::endl;
@@ -560,6 +558,7 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
     float lcl_meas_psuedo[SvtxAlignmentState::NLOC]{};
     float glbl_derivative_dummy_empty[SvtxAlignmentState::NGL]{};
     int glbl_label_dummy_empty[SvtxAlignmentState::NGL]{};
+    SvtxAlignmentState::ActsTrackParamsVector lcl_trackpars = state->get_acts_track_params();
     
     /// For N residual local coordinates x, z
     for (int i = 0; i < SvtxAlignmentState::NRES; ++i)
@@ -578,8 +577,8 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
         if (trkrid == TrkrDefs::mvtxId)
         {
           // need stave to get clamshell
-           auto stave4clam = MvtxDefs::getStaveId(ckey);
-          auto clamshell = AlignmentDefs::getMvtxClamshell(layer, stave4clam);
+           auto stave = MvtxDefs::getStaveId(ckey);
+          auto clamshell = AlignmentDefs::getMvtxClamshell(layer, stave);
           if (is_layer_param_fixed(layer, j, fixed_layer_gparams) ||
               is_mvtx_layer_fixed(layer, clamshell))
           {
@@ -647,7 +646,7 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
           AlignmentDefs::printBuffers(i, residual, clus_sigma, lcl_derivative[i], glbl_derivative[i], glbl_label);
         }
         float errinf = 1.0;
-        if (m_layerMisalignment.contains(layer))
+        if (m_layerMisalignment.find(layer) != m_layerMisalignment.end())
         {
           errinf = m_layerMisalignment.find(layer)->second;
         }
@@ -670,15 +669,14 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
 
     float ntp_data[] = {
       (float) layer, (float) stave, (float) chip, (float) residual(0), (float) residual(1), (float) clusphi, (float) global[0], (float) global[1], (float) global[2],
-      (float) clus_sigma(0), (float) clus_sigma(1), 
+      (float) clus_sigma(0), (float) clus_sigma(1), (float) lcl_trackpars(0), (float) lcl_trackpars(1), (float) lcl_trackpars(2), (float) lcl_trackpars(3), (float) lcl_trackpars(4), (float) lcl_trackpars(5),
       lcl_derivative[0][0], lcl_derivative[0][1], lcl_derivative[0][2], lcl_derivative[0][3], lcl_derivative[0][4], lcl_derivative[0][5],
       glbl_derivative[0][0], glbl_derivative[0][1], glbl_derivative[0][2], glbl_derivative[0][3], glbl_derivative[0][4], glbl_derivative[0][5],
       lcl_derivative[1][0], lcl_derivative[1][1], lcl_derivative[1][2], lcl_derivative[1][3], lcl_derivative[1][4], lcl_derivative[1][5],
       glbl_derivative[1][0], glbl_derivative[1][1], glbl_derivative[1][2], glbl_derivative[1][3], glbl_derivative[1][4], glbl_derivative[1][5],
     };
 
-    if (m_ntuple) { m_ntuple->Fill(ntp_data);
-}
+    if (m_ntuple) m_ntuple->Fill(ntp_data);
   }
 
   return;
@@ -759,5 +757,3 @@ bool MakeMilleFiles::is_tpc_sector_fixed(unsigned int layer, unsigned int sector
 
   return ret;
 }
-
-
