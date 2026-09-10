@@ -108,6 +108,17 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
       "dYdalpha:dYdbeta:dYdgamma:dYdx:dYdy:dYdz"
     );
     m_ntuple->SetDirectory(m_file);
+
+    track_ntp = new TNtuple(
+        "track_ntp", "MakeMilleFiles track ntuple",
+        "track_id:quality:residual_vertexX:residual_vertexY:"
+        "residualxsigma:residualysigma:"
+        "dXdR:dXdZ0:dXdphi:dXdtheta:dXdqoverp:dXdt:"
+        "dYdR:dYdZ0:dYdphi:dYdtheta:dYdqoverp:dYdt:"
+        "dXdx:dXdy:dXdz:dYdx:dYdy:dYdz:"
+        "track_xvtx:track_yvtx:track_zvtx:"
+        "event_xvtx:event_yvtx:event_zvtx:track_phi:track_eta:track_p:track_pt");
+    track_ntp->SetDirectory(m_file);
   }
 
   return ret;
@@ -195,6 +206,7 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
 
       auto dcapair = TrackAnalysisUtils::get_dca(track, eventVertex);
       Acts::Vector2 vtx_residual(-dcapair.first.first, -dcapair.second.first);
+      // Convert the DCA residual from cm to mm; m_vtxSigma is specified in mm.
       vtx_residual *= Acts::UnitConstants::cm;
 
       float lclvtx_derivative[SvtxAlignmentState::NRES][SvtxAlignmentState::NLOC];
@@ -221,11 +233,48 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
           std::cout << std::endl;
         }
       }
+      // track_ntp records only tracks with successful vertex propagation and
+      // at least one finite vertex residual.
       if (success)
       {
+        if (track_ntp &&
+            (std::isfinite(vtx_residual(0)) || std::isfinite(vtx_residual(1))))
+        {
+          float track_ntp_data[] = {
+              static_cast<float>(track->get_id()),
+              static_cast<float>(track->get_quality()),
+              static_cast<float>(vtx_residual(0)),
+              static_cast<float>(vtx_residual(1)),
+              m_vtxSigma(0),
+              m_vtxSigma(1),
+              lclvtx_derivative[0][0], lclvtx_derivative[0][1],
+              lclvtx_derivative[0][2], lclvtx_derivative[0][3],
+              lclvtx_derivative[0][4], lclvtx_derivative[0][5],
+              lclvtx_derivative[1][0], lclvtx_derivative[1][1],
+              lclvtx_derivative[1][2], lclvtx_derivative[1][3],
+              lclvtx_derivative[1][4], lclvtx_derivative[1][5],
+              glblvtx_derivative[0][0], glblvtx_derivative[0][1],
+              glblvtx_derivative[0][2],
+              glblvtx_derivative[1][0], glblvtx_derivative[1][1],
+              glblvtx_derivative[1][2],
+              // SvtxTrack and SvtxVertex positions are in cm; store mm to
+              // match the vertex residual and m_vtxSigma conventions.
+              static_cast<float>(track->get_x() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_y() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_z() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.x() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.y() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.z() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_phi()),
+              static_cast<float>(track->get_eta()),
+              static_cast<float>(track->get_p()),
+              static_cast<float>(track->get_pt())};
+          track_ntp->Fill(track_ntp_data);
+        }
+
         for (int i = 0; i < 2; i++)
         {
-          if (!std::isnan(vtx_residual(i)))
+          if (std::isfinite(vtx_residual(i)))
           {
             _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
                           AlignmentDefs::NGLVTX, glblvtx_derivative[i],
@@ -254,9 +303,16 @@ int MakeMilleFiles::End(PHCompositeNode* /*unused*/)
   delete _mille;
   m_constraintFile.close();
 
-  if (m_file && m_ntuple)
+  if (m_file)
   {
-    m_ntuple->Write();
+    if (m_ntuple)
+    {
+      m_ntuple->Write();
+    }
+    if (track_ntp)
+    {
+      track_ntp->Write();
+    }
     m_file->Write();
     m_file->Close();
   }
