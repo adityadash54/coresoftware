@@ -24,7 +24,10 @@
 #include <ActsExamples/EventData/Trajectories.hpp>
 
 #include <fstream>
+#include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class PHCompositeNode;
@@ -159,6 +162,7 @@ class MakeMilleFiles : public SubsysReco
   std::string m_tfile_name;
   TFile* m_file{nullptr};
   TNtuple* m_ntuple{nullptr};
+  TNtuple* track_ntp{nullptr};
 };
 
 #endif  // MAKEMILLEFILES_H
