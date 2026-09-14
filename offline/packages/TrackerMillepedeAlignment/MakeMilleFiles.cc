@@ -17,7 +17,11 @@
 #include <trackbase_historic/SvtxTrack.h>
 #include <trackbase_historic/SvtxTrackMap.h>
 #include <trackbase_historic/SvtxTrackState.h>
+#include <trackbase_historic/TrackSeed.h>
 #include <trackbase_historic/TrackAnalysisUtils.h>
+
+#include <globalvertex/SvtxVertexMap.h>
+#include <globalvertex/SvtxVertex.h>
 
 #include <trackreco/ActsPropagator.h>
 
@@ -39,8 +43,10 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 namespace
@@ -105,6 +111,17 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
       "dYdalpha:dYdbeta:dYdgamma:dYdx:dYdy:dYdz"
     );
     m_ntuple->SetDirectory(m_file);
+
+    track_ntp = new TNtuple(
+        "track_ntp", "MakeMilleFiles track ntuple",
+        "track_id:quality:residual_vertexX:residual_vertexY:"
+        "residualxsigma:residualysigma:"
+        "dXdR:dXdZ0:dXdphi:dXdtheta:dXdqoverp:dXdt:"
+        "dYdR:dYdZ0:dYdphi:dYdtheta:dYdqoverp:dYdt:"
+        "dXdx:dXdy:dXdz:dYdx:dYdy:dYdz:"
+        "track_xvtx:track_yvtx:track_zvtx:"
+        "event_xvtx:event_yvtx:event_zvtx:track_phi:track_eta:track_p:track_pt");
+    track_ntp->SetDirectory(m_file);
   }
 
   return ret;
@@ -140,13 +157,31 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     std::cout << "state map size " << _state_map->size() << std::endl;
   }
 
-  Acts::Vector3 eventVertex = Acts::Vector3::Zero();
-  if (m_useEventVertex)
-  {
-    eventVertex = getEventVertex();
-  }
-
   ActsPropagator propagator(_tGeometry);
+
+  unsigned int n_track_map_matches = 0;
+  unsigned int n_track_cuts_pass = 0;
+  unsigned int n_matching_vertices = 0;
+  unsigned int n_vertex_position_matches = 0;
+  unsigned int n_propagation_successes = 0;
+  unsigned int n_finite_vertex_residuals = 0;
+  unsigned int n_track_ntp_fills = 0;
+  unsigned int n_missing_track_map_entries = 0;
+  unsigned int n_null_tracks = 0;
+  unsigned int n_empty_state_vectors = 0;
+  unsigned int n_rejected_pt = 0;
+  unsigned int n_rejected_nmvtx = 0;
+  unsigned int n_rejected_nintt = 0;
+  unsigned int n_rejected_vertex_multiplicity = 0;
+  unsigned int n_rejected_vertex_high_pt_multiplicity = 0;
+  unsigned int n_missing_matching_vertices = 0;
+  unsigned int n_rejected_vertex_position = 0;
+  unsigned int n_insufficient_track_states = 0;
+  unsigned int n_propagation_failures = 0;
+  unsigned int n_nonfinite_vertex_residuals = 0;
+  unsigned int n_unavailable_track_ntuple = 0;
+  std::unordered_map<unsigned int, unsigned int> high_pt_tracks_per_vertex;
+  bool printed_vertex_map = false;
 
   for (auto [key, statevec] : *_state_map)
   {
@@ -154,10 +189,39 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
     auto iter = _track_map->find(key);
     if (iter == _track_map->end())
     {
+      ++n_missing_track_map_entries;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: alignment-state key "
+                  << key << " is absent from " << m_track_map_name
+                  << std::endl;
+      }
       continue;
     }
 
     SvtxTrack* track = iter->second;
+    if (!track)
+    {
+      ++n_null_tracks;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: null track for key "
+                  << key << std::endl;
+      }
+      continue;
+    }
+    ++n_track_map_matches;
+
+    if (statevec.empty())
+    {
+      ++n_empty_state_vectors;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp diagnostic: track "
+                  << track->get_id()
+                  << " has an empty alignment-state vector" << std::endl;
+      }
+    }
 
     if (Verbosity() > 0)
     {
@@ -166,36 +230,243 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
                 << ": Total tracks: " << _track_map->size() << ": phi: " << track->get_phi() << std::endl;
     }
 
-    //! Make any desired track cuts here
-    //! Maybe set a lower pT limit - low pT tracks are not very sensitive to alignment
-    if(track->get_pt() < m_minPt)
+    // Apply the track-quality cuts before adding any cluster or vertex residuals.
+    unsigned int nmvtx = 0;
+    unsigned int nintt = 0;
+    const auto count_silicon_clusters = [&nmvtx, &nintt](const auto* cluster_source)
     {
+      for (auto cluster_iter = cluster_source->begin_cluster_keys();
+           cluster_iter != cluster_source->end_cluster_keys(); ++cluster_iter)
+      {
+        switch (TrkrDefs::getTrkrId(*cluster_iter))
+        {
+        case TrkrDefs::mvtxId:
+          ++nmvtx;
+          break;
+
+        case TrkrDefs::inttId:
+          ++nintt;
+          break;
+
+        default:
+          break;
+        }
+      }
+    };
+
+    if (track->begin_cluster_keys() != track->end_cluster_keys())
+    {
+      count_silicon_clusters(track);
+    }
+    else if (const TrackSeed* silicon_seed = track->get_silicon_seed())
+    {
+      count_silicon_clusters(silicon_seed);
+    }
+
+    size_t vertex_ntracks = 0;
+    unsigned int n_vertex_tracks_above_pt = 0;
+    const bool applyMaxTracksAboveMinPtCut =
+        m_maxTracksAboveMinPtPerVertex !=
+        std::numeric_limits<unsigned int>::max();
+    const SvtxVertex* vertex = nullptr;
+    if (m_useEventVertex && m_vertex_map)
+    {
+      vertex = m_vertex_map->get(track->get_vertex_id());
+      if (vertex && vertex->get_beam_crossing() == track->get_crossing())
+      {
+        vertex_ntracks = vertex->size_tracks();
+        if (applyMaxTracksAboveMinPtCut)
+        {
+          const unsigned int vertex_id = track->get_vertex_id();
+          const auto cached_count = high_pt_tracks_per_vertex.find(vertex_id);
+          if (cached_count != high_pt_tracks_per_vertex.end())
+          {
+            n_vertex_tracks_above_pt = cached_count->second;
+          }
+          else
+          {
+            for (auto vertex_track_iter = vertex->begin_tracks();
+                 vertex_track_iter != vertex->end_tracks(); ++vertex_track_iter)
+            {
+              const auto track_iter = _track_map->find(*vertex_track_iter);
+              if (track_iter != _track_map->end() &&
+                  track_iter->second &&
+                  track_iter->second->get_pt() >= m_minPt)
+              {
+                ++n_vertex_tracks_above_pt;
+              }
+            }
+            high_pt_tracks_per_vertex.emplace(vertex_id,
+                                              n_vertex_tracks_above_pt);
+          }
+        }
+      }
+    }
+
+    if (m_useEventVertex && Verbosity() > 0)
+    {
+      if (vertex && vertex->get_beam_crossing() == track->get_crossing())
+      {
+        std::cout << "Track " << track->get_id()
+                  << " matched vertex " << track->get_vertex_id()
+                  << " at crossing " << track->get_crossing()
+                  << ", position (cm) = (" << vertex->get_x() << ", "
+                  << vertex->get_y() << ", " << vertex->get_z() << ")"
+                  << std::endl;
+      }
+      else
+      {
+        std::cout << "Track " << track->get_id()
+                  << " has no matching vertex: requested vertex "
+                  << track->get_vertex_id() << " at crossing "
+                  << track->get_crossing();
+        if (vertex)
+        {
+          std::cout << "; assigned vertex crossing "
+                    << vertex->get_beam_crossing()
+                    << ", position (cm) = (" << vertex->get_x() << ", "
+                    << vertex->get_y() << ", " << vertex->get_z() << ")";
+        }
+        else
+        {
+          std::cout << "; requested vertex is absent";
+        }
+        std::cout << std::endl;
+
+        if (!printed_vertex_map && m_vertex_map)
+        {
+          std::cout << "Available vertices:" << std::endl;
+          for (const auto& [vertex_id, available_vertex] : *m_vertex_map)
+          {
+            if (available_vertex)
+            {
+              std::cout << "  vertex " << vertex_id
+                        << ", crossing "
+                        << available_vertex->get_beam_crossing()
+                        << ", position (cm) = ("
+                        << available_vertex->get_x() << ", "
+                        << available_vertex->get_y() << ", "
+                        << available_vertex->get_z() << ")"
+                        << ", ntracks=" << available_vertex->size_tracks()
+                        << std::endl;
+            }
+          }
+          printed_vertex_map = true;
+        }
+      }
+    }
+
+    const bool hasTooManyTracksAboveMinPt =
+        applyMaxTracksAboveMinPtCut &&
+        n_vertex_tracks_above_pt > m_maxTracksAboveMinPtPerVertex;
+    const bool failsPt = track->get_pt() < m_minPt;
+    const bool failsNmvtx = nmvtx < m_minNmvtx;
+    const bool failsNintt = nintt < m_minNintt;
+    const bool failsVertexMultiplicity =
+        vertex_ntracks < m_minVertexTracks;
+    if (failsPt || failsNmvtx || failsNintt || failsVertexMultiplicity ||
+        hasTooManyTracksAboveMinPt)
+    {
+      n_rejected_pt += failsPt;
+      n_rejected_nmvtx += failsNmvtx;
+      n_rejected_nintt += failsNintt;
+      n_rejected_vertex_multiplicity += failsVertexMultiplicity;
+      n_rejected_vertex_high_pt_multiplicity +=
+          hasTooManyTracksAboveMinPt;
       if (Verbosity() > 0)
       {
-        std::cout << "Skipping track with pT " << track->get_pt() << " < " << m_minPt << std::endl;
+        std::cout << "Skipping track with pT=" << track->get_pt()
+                  << ", nMVTX=" << nmvtx << ", nINTT=" << nintt
+                  << ", vertex_ntracks=" << vertex_ntracks;
+        if (applyMaxTracksAboveMinPtCut)
+        {
+          std::cout << ", vertex tracks with pT >= " << m_minPt
+                    << "=" << n_vertex_tracks_above_pt
+                    << ", maximum=" << m_maxTracksAboveMinPtPerVertex;
+        }
+        std::cout << " (minimums: " << m_minPt << ", "
+                  << m_minNmvtx << ", " << m_minNintt << ", "
+                  << m_minVertexTracks << ")"
+                  << std::endl;
+      }
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: track "
+                  << track->get_id() << " failed"
+                  << (failsPt ? " pT" : "")
+                  << (failsNmvtx ? " nMVTX" : "")
+                  << (failsNintt ? " nINTT" : "")
+                  << (failsVertexMultiplicity ? " vertex_ntracks" : "")
+                  << (hasTooManyTracksAboveMinPt
+                          ? " vertex_high_pt_multiplicity"
+                          : "")
+                  << std::endl;
       }
       continue;
     }
+    ++n_track_cuts_pass;
     addTrackToMilleFile(statevec);
 
-    //! Only take tracks that have 2 mm within event vertex
-    if (m_useEventVertex &&
-        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
-        std::abs(track->get_x()) < 0.2 &&
-        std::abs(track->get_y()) < 0.2)
+    Acts::Vector3 eventVertex = Acts::Vector3::Zero();
+    bool hasMatchingVertex = false;
+    if (m_useEventVertex)
     {
-      //! set x and y to 0 since we are constraining to the x-y origin
-      //! and add constraints to pede later
-      eventVertex(0) = 0;
-      eventVertex(1) = 0;
+      eventVertex = getEventVertex(track);
+      hasMatchingVertex = std::isfinite(eventVertex.z());
+    }
+    if (hasMatchingVertex)
+    {
+      ++n_matching_vertices;
+    }
+    else
+    {
+      ++n_missing_matching_vertices;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: track "
+                  << track->get_id() << " has no vertex matching ID "
+                  << track->get_vertex_id() << " and crossing "
+                  << track->get_crossing() << std::endl;
+      }
+    }
+
+    // Only take tracks within the configured x/y/z cuts of the event vertex.
+    const bool isVertexPositionMatch =
+        m_useEventVertex && hasMatchingVertex &&
+        std::abs(track->get_x() - eventVertex.x()) < m_vertexMatchCutCm.x() &&
+        std::abs(track->get_y() - eventVertex.y()) < m_vertexMatchCutCm.y() &&
+        std::abs(track->get_z() - eventVertex.z()) < m_vertexMatchCutCm.z();
+    if (isVertexPositionMatch)
+    {
+      ++n_vertex_position_matches;
+      //! Retain the reconstructed transverse vertex coordinates.
+      // eventVertex(0) = 0;
+      // eventVertex(1) = 0;
 
       auto dcapair = TrackAnalysisUtils::get_dca(track, eventVertex);
       Acts::Vector2 vtx_residual(-dcapair.first.first, -dcapair.second.first);
+      // Convert the DCA residual from cm to mm; m_vtxSigma is specified in mm.
       vtx_residual *= Acts::UnitConstants::cm;
 
       float lclvtx_derivative[SvtxAlignmentState::NRES][SvtxAlignmentState::NLOC];
-      bool success = getLocalVtxDerivativesXY(track, propagator,
-                                              eventVertex, lclvtx_derivative);
+      bool success = false;
+      if (track->size_states() < 2)
+      {
+        ++n_insufficient_track_states;
+        if (m_trackNtpDiagnostics)
+        {
+          std::cout << "MakeMilleFiles track_ntp reject: track "
+                    << track->get_id() << " has " << track->size_states()
+                    << " states; need at least two to propagate from a "
+                       "silicon measurement"
+                    << std::endl;
+        }
+      }
+      else
+      {
+        success = getLocalVtxDerivativesXY(track, propagator,
+                                           eventVertex, lclvtx_derivative);
+      }
 
       // The global derivs dimensions are [alpha/beta/gamma](x/y/z)
       float glblvtx_derivative[SvtxAlignmentState::NRES][3];
@@ -217,11 +488,83 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
           std::cout << std::endl;
         }
       }
+      // track_ntp records only tracks with successful vertex propagation and
+      // at least one finite vertex residual.
       if (success)
       {
+        ++n_propagation_successes;
+        const bool hasFiniteVertexResidual =
+            std::isfinite(vtx_residual(0)) || std::isfinite(vtx_residual(1));
+        if (hasFiniteVertexResidual)
+        {
+          ++n_finite_vertex_residuals;
+        }
+        if (hasFiniteVertexResidual && !track_ntp)
+        {
+          ++n_unavailable_track_ntuple;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp reject: track_ntp tree "
+                      << "is unavailable for track " << track->get_id()
+                      << std::endl;
+          }
+        }
+        else if (track_ntp && hasFiniteVertexResidual)
+        {
+          float track_ntp_data[] = {
+              static_cast<float>(track->get_id()),
+              static_cast<float>(track->get_quality()),
+              static_cast<float>(vtx_residual(0)),
+              static_cast<float>(vtx_residual(1)),
+              static_cast<float>(m_vtxSigma(0)),
+              static_cast<float>(m_vtxSigma(1)),
+              lclvtx_derivative[0][0], lclvtx_derivative[0][1],
+              lclvtx_derivative[0][2], lclvtx_derivative[0][3],
+              lclvtx_derivative[0][4], lclvtx_derivative[0][5],
+              lclvtx_derivative[1][0], lclvtx_derivative[1][1],
+              lclvtx_derivative[1][2], lclvtx_derivative[1][3],
+              lclvtx_derivative[1][4], lclvtx_derivative[1][5],
+              glblvtx_derivative[0][0], glblvtx_derivative[0][1],
+              glblvtx_derivative[0][2],
+              glblvtx_derivative[1][0], glblvtx_derivative[1][1],
+              glblvtx_derivative[1][2],
+              // SvtxTrack and SvtxVertex positions are in cm; store mm to
+              // match the vertex residual and m_vtxSigma conventions.
+              static_cast<float>(track->get_x() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_y() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_z() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.x() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.y() * Acts::UnitConstants::cm),
+              static_cast<float>(eventVertex.z() * Acts::UnitConstants::cm),
+              static_cast<float>(track->get_phi()),
+              static_cast<float>(track->get_eta()),
+              static_cast<float>(track->get_p()),
+              static_cast<float>(track->get_pt())};
+          track_ntp->Fill(track_ntp_data);
+          ++n_track_ntp_fills;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp fill: track "
+                      << track->get_id() << ", vertex residuals (mm) = ("
+                      << vtx_residual(0) << ", " << vtx_residual(1)
+                      << ")" << std::endl;
+          }
+        }
+
+        if (!hasFiniteVertexResidual)
+        {
+          ++n_nonfinite_vertex_residuals;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp reject: track "
+                      << track->get_id()
+                      << " has non-finite vertex residuals" << std::endl;
+          }
+        }
+
         for (int i = 0; i < 2; i++)
         {
-          if (!std::isnan(vtx_residual(i)))
+          if (std::isfinite(vtx_residual(i)))
           {
             _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
                           AlignmentDefs::NGLVTX, glblvtx_derivative[i],
@@ -230,6 +573,31 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
 
           }
         }
+      }
+      else if (track->size_states() >= 2)
+      {
+        ++n_propagation_failures;
+        if (m_trackNtpDiagnostics)
+        {
+          std::cout << "MakeMilleFiles track_ntp reject: propagation to "
+                    << "vertex failed for track " << track->get_id()
+                    << " (vertex ID " << track->get_vertex_id() << ")"
+                    << std::endl;
+        }
+      }
+    }
+    else if (hasMatchingVertex)
+    {
+      ++n_rejected_vertex_position;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: track "
+                  << track->get_id() << " is outside the vertex window; "
+                  << "track (cm) = (" << track->get_x() << ", "
+                  << track->get_y() << ", " << track->get_z()
+                  << "), vertex (cm) = (" << eventVertex.x() << ", "
+                  << eventVertex.y() << ", " << eventVertex.z() << ")"
+                  << std::endl;
       }
     }
 
@@ -240,6 +608,36 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
   if (Verbosity() > 0)
   {
     std::cout << "Finished processing mille file " << std::endl;
+    std::cout << "MakeMilleFiles::process_event vertex diagnostics: "
+              << "state-map tracks=" << _state_map->size()
+              << ", track-map matches=" << n_track_map_matches
+              << ", track-cuts-pass=" << n_track_cuts_pass
+              << ", matching vertices=" << n_matching_vertices
+              << ", within 2 mm=" << n_vertex_position_matches
+              << ", propagation successes=" << n_propagation_successes
+              << ", finite residuals=" << n_finite_vertex_residuals
+              << ", track_ntp fills=" << n_track_ntp_fills
+              << ", missing track-map entries=" << n_missing_track_map_entries
+              << ", null tracks=" << n_null_tracks
+              << ", empty state vectors=" << n_empty_state_vectors
+              << ", rejected pT=" << n_rejected_pt
+              << ", rejected nMVTX=" << n_rejected_nmvtx
+              << ", rejected nINTT=" << n_rejected_nintt
+              << ", rejected vertex multiplicity="
+              << n_rejected_vertex_multiplicity
+              << ", rejected vertex high-pT multiplicity="
+              << n_rejected_vertex_high_pt_multiplicity
+              << ", missing matching vertices="
+              << n_missing_matching_vertices
+              << ", rejected vertex position="
+              << n_rejected_vertex_position
+              << ", insufficient states=" << n_insufficient_track_states
+              << ", propagation failures=" << n_propagation_failures
+              << ", non-finite vertex residuals="
+              << n_nonfinite_vertex_residuals
+              << ", unavailable track_ntp tree="
+              << n_unavailable_track_ntuple
+              << std::endl;
   }
 
   return Fun4AllReturnCodes::EVENT_OK;
@@ -250,9 +648,16 @@ int MakeMilleFiles::End(PHCompositeNode* /*unused*/)
   delete _mille;
   m_constraintFile.close();
 
-  if (m_file && m_ntuple)
+  if (m_file)
   {
-    m_ntuple->Write();
+    if (m_ntuple)
+    {
+      m_ntuple->Write();
+    }
+    if (track_ntp)
+    {
+      track_ntp->Write();
+    }
     m_file->Write();
     m_file->Close();
   }
@@ -278,6 +683,13 @@ int MakeMilleFiles::GetNodes(PHCompositeNode* topNode)
         << "\t" << m_track_map_name << "\n"
         << "\tAborting\n"
         << std::endl;
+    return Fun4AllReturnCodes::ABORTEVENT;
+  }
+
+  m_vertex_map = findNode::getClass<SvtxVertexMap>(topNode, "SvtxVertexMap");
+  if (m_useEventVertex && !m_vertex_map)
+  {
+    std::cout << PHWHERE << " ERROR: Can't find node SvtxVertexMap" << std::endl;
     return Fun4AllReturnCodes::ABORTEVENT;
   }
 
@@ -321,7 +733,16 @@ bool MakeMilleFiles::getLocalVtxDerivativesXY(SvtxTrack* track,
   const auto param = propagator.makeTrackParams(firststate, track->get_charge(), surf).value();
   const auto perigee = propagator.makeVertexSurface(vertex);
   const auto actspropagator = propagator.makePropagator();
-  const ActsPropagator::SphenixPropagator::Options options(_tGeometry->geometry().getGeoContext(), _tGeometry->geometry().magFieldContext);
+  ActsPropagator::SphenixPropagator::Options options(
+      _tGeometry->geometry().getGeoContext(),
+      _tGeometry->geometry().magFieldContext);
+  const auto intersection = perigee->intersect(
+      _tGeometry->geometry().getGeoContext(),
+      param.position(_tGeometry->geometry().getGeoContext()),
+      param.momentum(), Acts::BoundaryTolerance::None(),
+      0.1 * Acts::UnitConstants::mm).closest();
+  options.direction =
+      Acts::Direction::fromScalarZeroAsPositive(intersection.pathLength());
 
   const auto result = actspropagator.propagate(param, *perigee, options);
 
@@ -437,39 +858,27 @@ Acts::Vector3 MakeMilleFiles::localToGlobalVertex(SvtxTrack* track,
 
   return pos_R;
 }
-
-Acts::Vector3 MakeMilleFiles::getEventVertex()
+Acts::Vector3 MakeMilleFiles::getEventVertex(const SvtxTrack* track) const
 {
-  /**
-   * Returns event vertex in cm as averaged track positions
-   */
-  float xsum = 0;
-  float ysum = 0;
-  float zsum = 0;
-  int nacceptedtracks = 0;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
 
-  for (auto [key, statevec] : *_state_map)
+  if (!track || !m_vertex_map)
   {
-    // Check if track was removed from cleaner
-    auto iter = _track_map->find(key);
-    if (iter == _track_map->end())
-    {
-      continue;
-    }
-
-    SvtxTrack* track = iter->second;
-
-    /// The track vertex is given by the fit as the PCA to the beamline
-    xsum += track->get_x();
-    ysum += track->get_y();
-    zsum += track->get_z();
-
-    nacceptedtracks++;
+    return Acts::Vector3::Constant(nan);
   }
 
-  return Acts::Vector3(xsum / nacceptedtracks,
-                       ysum / nacceptedtracks,
-                       zsum / nacceptedtracks);
+  const SvtxVertex* vertex =
+      m_vertex_map->get(track->get_vertex_id());
+  if (!vertex ||
+      vertex->get_beam_crossing() != track->get_crossing())
+  {
+    return Acts::Vector3::Constant(nan);
+  }
+
+  return Acts::Vector3(
+      vertex->get_x(),
+      vertex->get_y(),
+      vertex->get_z());
 }
 
 void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec)
@@ -499,8 +908,8 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
       }
       else if(trkrid == TrkrDefs::inttId)
       {
-        stave = InttDefs::getLadderZId(ckey);
-        chip = InttDefs::getLadderPhiId(ckey);
+        stave = InttDefs::getLadderPhiId(ckey);
+        chip = InttDefs::getLadderZId(ckey);
       }
     if(m_ignore_tpc && trkrid == TrkrDefs::tpcId)
       continue;
@@ -758,5 +1167,3 @@ bool MakeMilleFiles::is_tpc_sector_fixed(unsigned int layer, unsigned int sector
 
   return ret;
 }
-
-

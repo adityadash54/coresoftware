@@ -24,13 +24,18 @@
 #include <ActsExamples/EventData/Trajectories.hpp>
 
 #include <fstream>
+#include <limits>
+#include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 class PHCompositeNode;
 class PHG4TpcGeomContainer;
 class SvtxTrack;
 class SvtxTrackMap;
+class SvtxVertexMap;
 class TrkrCluster;
 class TrkrClusterContainer;
 class Mille;
@@ -70,6 +75,21 @@ class MakeMilleFiles : public SubsysReco
   void set_layer_lparam_fixed(unsigned int layer, unsigned int param);
 
   void set_pt_cut(float pt) { m_minPt = pt; }
+  void set_min_nmvtx(unsigned int nmvtx) { m_minNmvtx = nmvtx; }
+  void set_min_nintt(unsigned int nintt) { m_minNintt = nintt; }
+  void set_track_ntp_diagnostics(bool enable = true)
+  {
+    m_trackNtpDiagnostics = enable;
+  }
+  void set_min_vertex_tracks(unsigned int ntracks) { m_minVertexTracks = ntracks; }
+  void set_vertex_match_cut_cm(float xcut, float ycut, float zcut)
+  {
+    m_vertexMatchCutCm = {xcut, ycut, zcut};
+  }
+  void set_max_tracks_above_min_pt_per_vertex(unsigned int ntracks)
+  {
+    m_maxTracksAboveMinPtPerVertex = ntracks;
+  }
 
   void set_ignore_tpc() {m_ignore_tpc = true;}
 
@@ -95,7 +115,7 @@ class MakeMilleFiles : public SubsysReco
   Mille* _mille;
 
   int GetNodes(PHCompositeNode* topNode);
-  Acts::Vector3 getEventVertex();
+  Acts::Vector3 getEventVertex(const SvtxTrack* track) const;
 
   bool is_layer_fixed(unsigned int layer);
 
@@ -120,9 +140,16 @@ class MakeMilleFiles : public SubsysReco
   std::string data_outfilename = ("mille_output_data_file.bin");
   std::string steering_outfilename = ("steer.txt");
 
-  bool m_useEventVertex = false;
+  bool m_useEventVertex = true;
   bool _binary = true;
   float m_minPt = 0.0;
+  unsigned int m_minNmvtx = 0;
+  unsigned int m_minNintt = 0;
+  bool m_trackNtpDiagnostics = false;
+  unsigned int m_minVertexTracks = 0;
+  unsigned int m_maxTracksAboveMinPtPerVertex =
+      std::numeric_limits<unsigned int>::max();
+  Acts::Vector3 m_vertexMatchCutCm = {0.2, 0.2, 0.2};
 
   Acts::Vector2 m_vtxSigma = {0.1, 0.1};
 
@@ -146,6 +173,8 @@ class MakeMilleFiles : public SubsysReco
   std::string m_track_map_name{"SvtxTrackMap"};
   SvtxTrackMap* _track_map{nullptr};
 
+  SvtxVertexMap* m_vertex_map{nullptr};
+
   std::string m_state_map_name{"SvtxAlignmentStateMap"};
   SvtxAlignmentStateMap* _state_map{nullptr};
 
@@ -156,6 +185,7 @@ class MakeMilleFiles : public SubsysReco
   std::string m_tfile_name;
   TFile* m_file{nullptr};
   TNtuple* m_ntuple{nullptr};
+  TNtuple* track_ntp{nullptr};
 };
 
 #endif  // MAKEMILLEFILES_H
