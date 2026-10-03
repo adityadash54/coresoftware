@@ -17,9 +17,11 @@
 #include <trackbase_historic/SvtxTrack.h>
 #include <trackbase_historic/SvtxTrackMap.h>
 #include <trackbase_historic/SvtxTrackState.h>
+#include <trackbase_historic/TrackSeed.h>
 #include <trackbase_historic/TrackAnalysisUtils.h>
 
 #include <globalvertex/SvtxVertexMap.h>
+#include <globalvertex/SvtxVertex.h>
 
 #include <trackreco/ActsPropagator.h>
 
@@ -35,6 +37,7 @@
 #include <phool/phool.h>
 
 #include <TFile.h>
+#include <TH1D.h>
 #include <TNtuple.h>
 #include <TF1.h>
 
@@ -44,15 +47,28 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 namespace
 {
   /// square
   template <class T>
-  inline constexpr T square(const T& x)
+  constexpr T square(const T& x)
   {
     return x * x;
+  }
+
+  inline bool allFinite(const float* values, int n)
+  {
+    for (int i = 0; i < n; ++i)
+    {
+      if (!std::isfinite(values[i]))
+      {
+        return false;
+      }
+    }
+    return true;
   }
 }  // namespace
 
@@ -98,10 +114,67 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
   if (!m_tfile_name.empty())
   {
     m_file = TFile::Open(m_tfile_name.c_str(), "RECREATE");
+    m_trackCutFlow = new TH1D(
+        "h_trackCutFlow", "Cumulative MakeMilleFiles track cut flow;selection stage;tracks",
+        10, 0.5, 10.5);
+    m_trackCutFlow->GetXaxis()->SetBinLabel(1, "State-map entries");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(2, "Valid track");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(3, "p_{T}");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(4, "N_{MVTX}");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(5, "N_{INTT}");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(6, "N_{vertex tracks}");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(7, "Max N_{vertex tracks}(p_{T})");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(8, "Vertex association (required)");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(9, "Vertex window (required)");
+    m_trackCutFlow->GetXaxis()->SetBinLabel(10, "Vertex constraint (required)");
+    m_trackCutFlow->SetDirectory(m_file);
+
+    h_track_pt_after_pruning = new TH1D(
+        "h_track_pt_after_pruning", "Track p_{T} received by MakeMilleFiles;p_{T} [GeV/c];tracks",
+        200, 0, 10);
+    h_track_pt_after_pruning->SetDirectory(m_file);
+
+    h_track_pt_after_makemille_pt_cut = new TH1D(
+        "h_track_pt_after_makemille_pt_cut", "Track p_{T} after MakeMilleFiles pT cut;p_{T} [GeV/c];tracks",
+        200, 0, 10);
+    h_track_pt_after_makemille_pt_cut->SetDirectory(m_file);
+
+    h_vertex_ntracks = new TH1D(
+        "h_vertex_ntracks", "Vertex track count used by the MakeMilleFiles cut (-2 = no vertex, -1 = crossing mismatch);vertex_ntracks;tracks",
+        103, -2.5, 100.5);
+    h_vertex_ntracks->SetDirectory(m_file);
+
+    h_vertex_ntracks_raw = new TH1D(
+        "h_vertex_ntracks_raw", "Track count of the assigned vertex, ignoring crossing match;vertex tracks;tracks",
+        101, -0.5, 100.5);
+    h_vertex_ntracks_raw->SetDirectory(m_file);
+
+    // The last bin of h_absent_vertex_id and the overflow of this histogram hold
+    // the unassigned (maximum unsigned) vertex ID.
+    h_absent_vertex_id = new TH1D(
+        "h_absent_vertex_id", "Requested vertex ID of tracks with no vertex in the map (overflow = unassigned ID);vertex ID;tracks",
+        101, -0.5, 100.5);
+    h_absent_vertex_id->SetDirectory(m_file);
+
+    h_track_crossing_with_vertex = new TH1D(
+        "h_track_crossing_with_vertex", "Track crossing, tracks whose vertex exists;track crossing;tracks",
+        1001, -500.5, 500.5);
+    h_track_crossing_with_vertex->SetDirectory(m_file);
+
+    h_track_crossing_without_vertex = new TH1D(
+        "h_track_crossing_without_vertex", "Track crossing, tracks whose vertex is absent;track crossing;tracks",
+        1001, -500.5, 500.5);
+    h_track_crossing_without_vertex->SetDirectory(m_file);
+
+    h_track_vertex_crossing_diff = new TH1D(
+        "h_track_vertex_crossing_diff", "Track crossing - vertex crossing (tracks with a vertex);track crossing - vertex crossing;tracks",
+        101, -50.5, 50.5);
+    h_track_vertex_crossing_diff->SetDirectory(m_file);
+
     m_ntuple = new TNtuple (
       "ntp", "ntp",
       "layer:stave:chip:residualX:residualY:clusphi:xglob:yglob:zglob:"
-      "errX:errY:l0:l1:phi:theta:qoverp:time:"
+      "errX:errY:"
       "dXdR:dXdZ0:dXdphi:dXdtheta:dXdqoverp:dXdt:"
       "dXdalpha:dXdbeta:dXdgamma:dXdx:dXdy:dXdz:"
       "dYdR:dYdZ0:dYdphi:dYdtheta:dYdqoverp:dYdt:"
@@ -156,16 +229,87 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
 
   ActsPropagator propagator(_tGeometry);
 
+  unsigned int n_track_map_matches = 0;
+  unsigned int n_track_cuts_pass = 0;
+  unsigned int n_matching_vertices = 0;
+  unsigned int n_vertex_position_matches = 0;
+  unsigned int n_propagation_successes = 0;
+  unsigned int n_finite_vertex_residuals = 0;
+  unsigned int n_track_ntp_fills = 0;
+  unsigned int n_missing_track_map_entries = 0;
+  unsigned int n_null_tracks = 0;
+  unsigned int n_empty_state_vectors = 0;
+  unsigned int n_rejected_pt = 0;
+  unsigned int n_rejected_nmvtx = 0;
+  unsigned int n_rejected_nintt = 0;
+  unsigned int n_rejected_vertex_multiplicity = 0;
+  unsigned int n_rejected_vertex_high_pt_multiplicity = 0;
+  unsigned int n_missing_matching_vertices = 0;
+  unsigned int n_track_vertex_absent = 0;
+  unsigned int n_track_vertex_crossing_mismatch = 0;
+  unsigned int n_absent_vertex_id_unassigned = 0;
+  unsigned int n_crossing_diff_underflow = 0;
+  unsigned int n_crossing_diff_overflow = 0;
+  unsigned int n_rejected_vertex_position = 0;
+  unsigned int n_insufficient_track_states = 0;
+  unsigned int n_propagation_failures = 0;
+  unsigned int n_nonfinite_vertex_residuals = 0;
+  unsigned int n_unavailable_track_ntuple = 0;
+  std::unordered_map<unsigned int, unsigned int> high_pt_tracks_per_vertex;
+  bool printed_vertex_map = false;
+
   for (auto [key, statevec] : *_state_map)
   {
+    if (m_trackCutFlow)
+    {
+      m_trackCutFlow->Fill(1.0);
+    }
+
     // Check if track was removed from cleaner
     auto iter = _track_map->find(key);
     if (iter == _track_map->end())
     {
+      ++n_missing_track_map_entries;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: alignment-state key "
+                  << key << " is absent from " << m_track_map_name
+                  << std::endl;
+      }
       continue;
     }
 
     SvtxTrack* track = iter->second;
+    if (!track)
+    {
+      ++n_null_tracks;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: null track for key "
+                  << key << std::endl;
+      }
+      continue;
+    }
+    ++n_track_map_matches;
+    if (m_trackCutFlow)
+    {
+      m_trackCutFlow->Fill(2.0);
+    }
+    if (h_track_pt_after_pruning)
+    {
+      h_track_pt_after_pruning->Fill(track->get_pt());
+    }
+
+    if (statevec.empty())
+    {
+      ++n_empty_state_vectors;
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp diagnostic: track "
+                  << track->get_id()
+                  << " has an empty alignment-state vector" << std::endl;
+      }
+    }
 
     if (Verbosity() > 0)
     {
@@ -174,31 +318,326 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
                 << ": Total tracks: " << _track_map->size() << ": phi: " << track->get_phi() << std::endl;
     }
 
-    //! Make any desired track cuts here
-    //! Maybe set a lower pT limit - low pT tracks are not very sensitive to alignment
-    if(track->get_pt() < m_minPt)
+    // Apply the track-quality cuts before adding any cluster or vertex residuals.
+    unsigned int nmvtx = 0;
+    unsigned int nintt = 0;
+    const auto count_silicon_clusters = [&nmvtx, &nintt](const auto* cluster_source)
     {
+      for (auto cluster_iter = cluster_source->begin_cluster_keys();
+           cluster_iter != cluster_source->end_cluster_keys(); ++cluster_iter)
+      {
+        switch (TrkrDefs::getTrkrId(*cluster_iter))
+        {
+        case TrkrDefs::mvtxId:
+          ++nmvtx;
+          break;
+
+        case TrkrDefs::inttId:
+          ++nintt;
+          break;
+
+        default:
+          break;
+        }
+      }
+    };
+
+    if (track->begin_cluster_keys() != track->end_cluster_keys())
+    {
+      count_silicon_clusters(track);
+    }
+    else if (const TrackSeed* silicon_seed = track->get_silicon_seed())
+    {
+      count_silicon_clusters(silicon_seed);
+    }
+
+    size_t vertex_ntracks = 0;
+    unsigned int n_vertex_tracks_above_pt = 0;
+    const bool applyMaxTracksAboveMinPtCut =
+        m_maxTracksAboveMinPtPerVertex !=
+        std::numeric_limits<unsigned int>::max();
+    const SvtxVertex* vertex = nullptr;
+    if (m_useEventVertex && m_vertex_map)
+    {
+      vertex = m_vertex_map->get(track->get_vertex_id());
+      if (!vertex)
+      {
+        ++n_track_vertex_absent;
+        if (track->get_vertex_id() == std::numeric_limits<unsigned int>::max())
+        {
+          ++n_absent_vertex_id_unassigned;
+        }
+        if (h_absent_vertex_id)
+        {
+          h_absent_vertex_id->Fill(static_cast<double>(track->get_vertex_id()));
+        }
+        if (h_track_crossing_without_vertex)
+        {
+          h_track_crossing_without_vertex->Fill(track->get_crossing());
+        }
+      }
+      else
+      {
+        const int crossing_diff =
+            static_cast<int>(track->get_crossing()) -
+            static_cast<int>(vertex->get_beam_crossing());
+        if (crossing_diff != 0)
+        {
+          ++n_track_vertex_crossing_mismatch;
+        }
+        if (crossing_diff < -50)
+        {
+          ++n_crossing_diff_underflow;
+        }
+        else if (crossing_diff > 50)
+        {
+          ++n_crossing_diff_overflow;
+        }
+        if (h_vertex_ntracks_raw)
+        {
+          h_vertex_ntracks_raw->Fill(vertex->size_tracks());
+        }
+        if (h_track_crossing_with_vertex)
+        {
+          h_track_crossing_with_vertex->Fill(track->get_crossing());
+        }
+        if (h_track_vertex_crossing_diff)
+        {
+          h_track_vertex_crossing_diff->Fill(crossing_diff);
+        }
+      }
+      if (vertex && vertex->get_beam_crossing() == track->get_crossing())
+      {
+        vertex_ntracks = vertex->size_tracks();
+        if (applyMaxTracksAboveMinPtCut)
+        {
+          const unsigned int vertex_id = track->get_vertex_id();
+          const auto cached_count = high_pt_tracks_per_vertex.find(vertex_id);
+          if (cached_count != high_pt_tracks_per_vertex.end())
+          {
+            n_vertex_tracks_above_pt = cached_count->second;
+          }
+          else
+          {
+            for (auto vertex_track_iter = vertex->begin_tracks();
+                 vertex_track_iter != vertex->end_tracks(); ++vertex_track_iter)
+            {
+              const auto track_iter = _track_map->find(*vertex_track_iter);
+              if (track_iter != _track_map->end() &&
+                  track_iter->second &&
+                  track_iter->second->get_pt() >= m_minPt)
+              {
+                ++n_vertex_tracks_above_pt;
+              }
+            }
+            high_pt_tracks_per_vertex.emplace(vertex_id,
+                                              n_vertex_tracks_above_pt);
+          }
+        }
+      }
+      if (h_vertex_ntracks)
+      {
+        // -2: no vertex in the map, -1: vertex crossing differs from the track's
+        double vertex_ntracks_fill = vertex_ntracks;
+        if (!vertex)
+        {
+          vertex_ntracks_fill = -2;
+        }
+        else if (vertex->get_beam_crossing() != track->get_crossing())
+        {
+          vertex_ntracks_fill = -1;
+        }
+        h_vertex_ntracks->Fill(vertex_ntracks_fill);
+      }
+    }
+
+    if (m_useEventVertex && Verbosity() > 0)
+    {
+      if (vertex && vertex->get_beam_crossing() == track->get_crossing())
+      {
+        std::cout << "Track " << track->get_id()
+                  << " matched vertex " << track->get_vertex_id()
+                  << " at crossing " << track->get_crossing()
+                  << ", position (cm) = (" << vertex->get_x() << ", "
+                  << vertex->get_y() << ", " << vertex->get_z() << ")"
+                  << std::endl;
+      }
+      else
+      {
+        std::cout << "Track " << track->get_id()
+                  << " has no matching vertex: requested vertex "
+                  << track->get_vertex_id() << " at crossing "
+                  << track->get_crossing();
+        if (vertex)
+        {
+          std::cout << "; assigned vertex crossing "
+                    << vertex->get_beam_crossing()
+                    << ", position (cm) = (" << vertex->get_x() << ", "
+                    << vertex->get_y() << ", " << vertex->get_z() << ")";
+        }
+        else
+        {
+          std::cout << "; requested vertex is absent";
+        }
+        std::cout << std::endl;
+
+        if (!printed_vertex_map && m_vertex_map)
+        {
+          std::cout << "Available vertices:" << std::endl;
+          for (const auto& [vertex_id, available_vertex] : *m_vertex_map)
+          {
+            if (available_vertex)
+            {
+              std::cout << "  vertex " << vertex_id
+                        << ", crossing "
+                        << available_vertex->get_beam_crossing()
+                        << ", position (cm) = ("
+                        << available_vertex->get_x() << ", "
+                        << available_vertex->get_y() << ", "
+                        << available_vertex->get_z() << ")"
+                        << ", ntracks=" << available_vertex->size_tracks()
+                        << std::endl;
+            }
+          }
+          printed_vertex_map = true;
+        }
+      }
+    }
+
+    const bool hasTooManyTracksAboveMinPt =
+        applyMaxTracksAboveMinPtCut &&
+        n_vertex_tracks_above_pt > m_maxTracksAboveMinPtPerVertex;
+    const bool failsPt = track->get_pt() < m_minPt;
+    if (h_track_pt_after_makemille_pt_cut && !failsPt)
+    {
+      h_track_pt_after_makemille_pt_cut->Fill(track->get_pt());
+    }
+    const bool failsNmvtx = nmvtx < m_minNmvtx;
+    const bool failsNintt = nintt < m_minNintt;
+    const bool failsVertexMultiplicity =
+        vertex_ntracks < m_minVertexTracks;
+    if (m_trackCutFlow && !failsPt)
+    {
+      m_trackCutFlow->Fill(3.0);
+    }
+    if (m_trackCutFlow && !failsPt && !failsNmvtx)
+    {
+      m_trackCutFlow->Fill(4.0);
+    }
+    if (m_trackCutFlow && !failsPt && !failsNmvtx && !failsNintt)
+    {
+      m_trackCutFlow->Fill(5.0);
+    }
+    if (m_trackCutFlow && !failsPt && !failsNmvtx && !failsNintt &&
+        !failsVertexMultiplicity)
+    {
+      m_trackCutFlow->Fill(6.0);
+    }
+    if (m_trackCutFlow && !failsPt && !failsNmvtx && !failsNintt &&
+        !failsVertexMultiplicity && !hasTooManyTracksAboveMinPt)
+    {
+      m_trackCutFlow->Fill(7.0);
+    }
+    if (failsPt || failsNmvtx || failsNintt || failsVertexMultiplicity ||
+        hasTooManyTracksAboveMinPt)
+    {
+      n_rejected_pt += failsPt;
+      n_rejected_nmvtx += failsNmvtx;
+      n_rejected_nintt += failsNintt;
+      n_rejected_vertex_multiplicity += failsVertexMultiplicity;
+      n_rejected_vertex_high_pt_multiplicity +=
+          hasTooManyTracksAboveMinPt;
       if (Verbosity() > 0)
       {
-        std::cout << "Skipping track with pT " << track->get_pt() << " < " << m_minPt << std::endl;
+        std::cout << "Skipping track with pT=" << track->get_pt()
+                  << ", nMVTX=" << nmvtx << ", nINTT=" << nintt
+                  << ", vertex_ntracks=" << vertex_ntracks;
+        if (applyMaxTracksAboveMinPtCut)
+        {
+          std::cout << ", vertex tracks with pT >= " << m_minPt
+                    << "=" << n_vertex_tracks_above_pt
+                    << ", maximum=" << m_maxTracksAboveMinPtPerVertex;
+        }
+        std::cout << " (minimums: " << m_minPt << ", "
+                  << m_minNmvtx << ", " << m_minNintt << ", "
+                  << m_minVertexTracks << ")"
+                  << std::endl;
+      }
+      if (m_trackNtpDiagnostics)
+      {
+        std::cout << "MakeMilleFiles track_ntp reject: track "
+                  << track->get_id() << " failed"
+                  << (failsPt ? " pT" : "")
+                  << (failsNmvtx ? " nMVTX" : "")
+                  << (failsNintt ? " nINTT" : "")
+                  << (failsVertexMultiplicity ? " vertex_ntracks" : "")
+                  << (hasTooManyTracksAboveMinPt
+                          ? " vertex_high_pt_multiplicity"
+                          : "")
+                  << std::endl;
       }
       continue;
     }
-    addTrackToMilleFile(statevec);
+    ++n_track_cuts_pass;
 
+    // With the event vertex enabled, a track must have a matching vertex
+    // inside the configured x/y/z window before any of its residuals are used.
     Acts::Vector3 eventVertex = Acts::Vector3::Zero();
-    bool hasMatchingVertex = false;
+    bool isVertexPositionMatch = false;
     if (m_useEventVertex)
     {
       eventVertex = getEventVertex(track);
-      hasMatchingVertex = std::isfinite(eventVertex.z());
+      if (!std::isfinite(eventVertex.z()))
+      {
+        ++n_missing_matching_vertices;
+        if (m_trackNtpDiagnostics)
+        {
+          std::cout << "MakeMilleFiles track_ntp reject: track "
+                    << track->get_id() << " has no vertex matching ID "
+                    << track->get_vertex_id() << " and crossing "
+                    << track->get_crossing() << std::endl;
+        }
+        continue;
+      }
+      ++n_matching_vertices;
+      if (m_trackCutFlow)
+      {
+        m_trackCutFlow->Fill(8.0);
+      }
+
+      isVertexPositionMatch =
+          std::abs(track->get_x() - eventVertex.x()) < m_vertexMatchCutCm.x() &&
+          std::abs(track->get_y() - eventVertex.y()) < m_vertexMatchCutCm.y() &&
+          std::abs(track->get_z() - eventVertex.z()) < m_vertexMatchCutCm.z();
+      if (!isVertexPositionMatch)
+      {
+        ++n_rejected_vertex_position;
+        if (m_trackNtpDiagnostics)
+        {
+          std::cout << "MakeMilleFiles track_ntp reject: track "
+                    << track->get_id() << " is outside the vertex window; "
+                    << "track (cm) = (" << track->get_x() << ", "
+                    << track->get_y() << ", " << track->get_z()
+                    << "), vertex (cm) = (" << eventVertex.x() << ", "
+                    << eventVertex.y() << ", " << eventVertex.z() << ")"
+                    << std::endl;
+        }
+        continue;
+      }
+      ++n_vertex_position_matches;
+      if (m_trackCutFlow)
+      {
+        m_trackCutFlow->Fill(9.0);
+      }
     }
 
-    //! Only take tracks that have 2 mm within event vertex
-    if (m_useEventVertex && hasMatchingVertex &&
-        std::abs(track->get_z() - eventVertex.z()) < 0.2 &&
-        std::abs(track->get_x() - eventVertex.x()) < 0.2 &&
-        std::abs(track->get_y() - eventVertex.y()) < 0.2)
+    // With the event vertex, the cluster residuals are written only after the
+    // vertex constraint is verified to be usable (see below).
+    if (!m_useEventVertex)
+    {
+      addTrackToMilleFile(statevec);
+    }
+    else
     {
       //! Retain the reconstructed transverse vertex coordinates.
       // eventVertex(0) = 0;
@@ -210,8 +649,24 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
       vtx_residual *= Acts::UnitConstants::cm;
 
       float lclvtx_derivative[SvtxAlignmentState::NRES][SvtxAlignmentState::NLOC];
-      bool success = getLocalVtxDerivativesXY(track, propagator,
-                                              eventVertex, lclvtx_derivative);
+      bool success = false;
+      if (track->size_states() < 2)
+      {
+        ++n_insufficient_track_states;
+        if (m_trackNtpDiagnostics)
+        {
+          std::cout << "MakeMilleFiles track_ntp reject: track "
+                    << track->get_id() << " has " << track->size_states()
+                    << " states; need at least two to propagate from a "
+                       "silicon measurement"
+                    << std::endl;
+        }
+      }
+      else
+      {
+        success = getLocalVtxDerivativesXY(track, propagator,
+                                           eventVertex, lclvtx_derivative);
+      }
 
       // The global derivs dimensions are [alpha/beta/gamma](x/y/z)
       float glblvtx_derivative[SvtxAlignmentState::NRES][3];
@@ -234,19 +689,58 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
         }
       }
       // track_ntp records only tracks with successful vertex propagation and
-      // at least one finite vertex residual.
+      // finite vertex residuals and derivatives in both components.
       if (success)
       {
-        if (track_ntp &&
-            (std::isfinite(vtx_residual(0)) || std::isfinite(vtx_residual(1))))
+        ++n_propagation_successes;
+        // The vertex constraint is used only if both residual components and
+        // all of their local and global derivatives are finite.
+        bool hasFiniteVertexResidual = true;
+        for (int i = 0; i < 2; i++)
+        {
+          hasFiniteVertexResidual =
+              hasFiniteVertexResidual && std::isfinite(vtx_residual(i)) &&
+              allFinite(lclvtx_derivative[i], SvtxAlignmentState::NLOC) &&
+              allFinite(glblvtx_derivative[i], AlignmentDefs::NGLVTX);
+        }
+        if (!hasFiniteVertexResidual)
+        {
+          ++n_nonfinite_vertex_residuals;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp reject: track "
+                      << track->get_id()
+                      << " has non-finite vertex residuals or derivatives"
+                      << std::endl;
+          }
+          continue;
+        }
+        ++n_finite_vertex_residuals;
+        if (m_trackCutFlow)
+        {
+          m_trackCutFlow->Fill(10.0);
+        }
+        addTrackToMilleFile(statevec);
+
+        if (!track_ntp)
+        {
+          ++n_unavailable_track_ntuple;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp reject: track_ntp tree "
+                      << "is unavailable for track " << track->get_id()
+                      << std::endl;
+          }
+        }
+        else
         {
           float track_ntp_data[] = {
               static_cast<float>(track->get_id()),
               static_cast<float>(track->get_quality()),
               static_cast<float>(vtx_residual(0)),
               static_cast<float>(vtx_residual(1)),
-              m_vtxSigma(0),
-              m_vtxSigma(1),
+              static_cast<float>(m_vtxSigma(0) * m_vtxSigmaInflation),
+              static_cast<float>(m_vtxSigma(1) * m_vtxSigmaInflation),
               lclvtx_derivative[0][0], lclvtx_derivative[0][1],
               lclvtx_derivative[0][2], lclvtx_derivative[0][3],
               lclvtx_derivative[0][4], lclvtx_derivative[0][5],
@@ -270,19 +764,47 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
               static_cast<float>(track->get_p()),
               static_cast<float>(track->get_pt())};
           track_ntp->Fill(track_ntp_data);
-        }
-
-        for (int i = 0; i < 2; i++)
-        {
-          if (std::isfinite(vtx_residual(i)))
+          ++n_track_ntp_fills;
+          if (m_trackNtpDiagnostics)
           {
-            _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
-                          AlignmentDefs::NGLVTX, glblvtx_derivative[i],
-                          AlignmentDefs::glbl_vtx_label, vtx_residual(i),
-                          m_vtxSigma(i));
-
+            std::cout << "MakeMilleFiles track_ntp fill: track "
+                      << track->get_id() << ", vertex residuals (mm) = ("
+                      << vtx_residual(0) << ", " << vtx_residual(1)
+                      << ")" << std::endl;
           }
         }
+
+        if (Verbosity() > 2)
+        {
+          // Sign check: d(d0)/d(loc0) should be +/-1; compare its sign with the
+          // get_dca-based vertex residual to verify the two conventions agree.
+          std::cout << "vertex sign check for track " << track->get_id()
+                    << ": vertex residual (mm) = (" << vtx_residual(0) << ", "
+                    << vtx_residual(1) << "), d(d0)/d(loc0) = "
+                    << lclvtx_derivative[0][0] << std::endl;
+        }
+        for (int i = 0; i < 2; i++)
+        {
+          _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
+                        AlignmentDefs::NGLVTX, glblvtx_derivative[i],
+                        AlignmentDefs::glbl_vtx_label, vtx_residual(i),
+                        m_vtxSigma(i) * m_vtxSigmaInflation);
+        }
+      }
+      else
+      {
+        if (track->size_states() >= 2)
+        {
+          ++n_propagation_failures;
+          if (m_trackNtpDiagnostics)
+          {
+            std::cout << "MakeMilleFiles track_ntp reject: propagation to "
+                      << "vertex failed for track " << track->get_id()
+                      << " (vertex ID " << track->get_vertex_id() << ")"
+                      << std::endl;
+          }
+        }
+        continue;
       }
     }
 
@@ -293,6 +815,46 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
   if (Verbosity() > 0)
   {
     std::cout << "Finished processing mille file " << std::endl;
+    std::cout << "MakeMilleFiles::process_event vertex diagnostics: "
+              << "state-map tracks=" << _state_map->size()
+              << ", track-map matches=" << n_track_map_matches
+              << ", track-cuts-pass=" << n_track_cuts_pass
+              << ", matching vertices=" << n_matching_vertices
+              << ", within 2 mm=" << n_vertex_position_matches
+              << ", propagation successes=" << n_propagation_successes
+              << ", finite residuals=" << n_finite_vertex_residuals
+              << ", track_ntp fills=" << n_track_ntp_fills
+              << ", missing track-map entries=" << n_missing_track_map_entries
+              << ", null tracks=" << n_null_tracks
+              << ", empty state vectors=" << n_empty_state_vectors
+              << ", rejected pT=" << n_rejected_pt
+              << ", rejected nMVTX=" << n_rejected_nmvtx
+              << ", rejected nINTT=" << n_rejected_nintt
+              << ", rejected vertex multiplicity="
+              << n_rejected_vertex_multiplicity
+              << ", rejected vertex high-pT multiplicity="
+              << n_rejected_vertex_high_pt_multiplicity
+              << ", missing matching vertices="
+              << n_missing_matching_vertices
+              << ", tracks with absent vertex="
+              << n_track_vertex_absent
+              << ", tracks with vertex crossing mismatch="
+              << n_track_vertex_crossing_mismatch
+              << ", absent-vertex tracks with unassigned vertex ID="
+              << n_absent_vertex_id_unassigned
+              << ", crossing difference underflow (< -50)="
+              << n_crossing_diff_underflow
+              << ", crossing difference overflow (> 50)="
+              << n_crossing_diff_overflow
+              << ", rejected vertex position="
+              << n_rejected_vertex_position
+              << ", insufficient states=" << n_insufficient_track_states
+              << ", propagation failures=" << n_propagation_failures
+              << ", non-finite vertex residuals="
+              << n_nonfinite_vertex_residuals
+              << ", unavailable track_ntp tree="
+              << n_unavailable_track_ntuple
+              << std::endl;
   }
 
   return Fun4AllReturnCodes::EVENT_OK;
@@ -382,13 +944,32 @@ bool MakeMilleFiles::getLocalVtxDerivativesXY(SvtxTrack* track,
   auto* firststate = (*std::next(track->begin_states(), 1)).second;
 
   const auto ckey = firststate->get_cluskey();
-  const auto cluster = _cluster_map->findCluster(ckey);
+  auto *const cluster = _cluster_map->findCluster(ckey);
   const auto surf = _tGeometry->maps().getSurface(ckey, cluster);
 
   const auto param = propagator.makeTrackParams(firststate, track->get_charge(), surf).value();
   const auto perigee = propagator.makeVertexSurface(vertex);
   const auto actspropagator = propagator.makePropagator();
-  const ActsPropagator::SphenixPropagator::Options options(_tGeometry->geometry().getGeoContext(), _tGeometry->geometry().magFieldContext);
+  ActsPropagator::SphenixPropagator::Options options(
+      _tGeometry->geometry().getGeoContext(),
+      _tGeometry->geometry().magFieldContext);
+  const auto intersection = perigee->intersect(
+      _tGeometry->geometry().getGeoContext(),
+      param.position(_tGeometry->geometry().getGeoContext()),
+      param.momentum(), Acts::BoundaryTolerance::None(),
+      0.1 * Acts::UnitConstants::mm).closest();
+  if (!intersection.isValid())
+  {
+    if (Verbosity() > 1)
+    {
+      std::cout << "MakeMilleFiles::getLocalVtxDerivativesXY - no valid "
+                << "intersection with the vertex perigee surface for track "
+                << track->get_id() << std::endl;
+    }
+    return false;
+  }
+  options.direction =
+      Acts::Direction::fromScalarZeroAsPositive(intersection.pathLength());
 
   const auto result = actspropagator.propagate(param, *perigee, options);
 
@@ -399,12 +980,17 @@ bool MakeMilleFiles::getLocalVtxDerivativesXY(SvtxTrack* track,
     Eigen::Matrix<double, 2, 6> projector = Eigen::Matrix<double, 2, 6>::Zero();
     projector(0, 0) = 1;
     projector(1, 1) = 1;
-    auto deriv = projector * jacobian;
+    Eigen::Matrix<double, 2, 6> deriv = projector * jacobian;
     if (Verbosity() > 2)
     {
-      std::cout << "local vtxderiv " << std::endl
+      std::cout << "local vtxderiv (full, before truncation) " << std::endl
                 << deriv << std::endl;
     }
+    // Temporary: the cluster rows only use local labels 1-2 (loc0, loc1), so
+    // keep only d(d0, z0)/d(loc0, loc1) here. Columns for phi, theta, q/p and t
+    // are not constrained by any cluster row and make pede's local matrix
+    // rank deficient.
+    deriv.rightCols<4>().setZero();
 
     for (int i = 0; i < deriv.rows(); i++)
     {
@@ -529,7 +1115,7 @@ Acts::Vector3 MakeMilleFiles::getEventVertex(const SvtxTrack* track) const
 
 void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec)
 {
-  for (auto state : statevec)
+  for (auto *state : statevec)
   {
     TrkrDefs::cluskey ckey = state->get_cluster_key();
 
@@ -554,11 +1140,12 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
       }
       else if(trkrid == TrkrDefs::inttId)
       {
-        stave = InttDefs::getLadderZId(ckey);
-        chip = InttDefs::getLadderPhiId(ckey);
+        stave = InttDefs::getLadderPhiId(ckey);
+        chip = InttDefs::getLadderZId(ckey);
       }
-    if(m_ignore_tpc && trkrid == TrkrDefs::tpcId)
+    if(m_ignore_tpc && trkrid == TrkrDefs::tpcId) {
       continue;
+}
     const SvtxAlignmentState::ResidualVector residual = state->get_residual();// / Acts::UnitConstants::cm;
     //auto acts_pars = state->parameters();
     //std::cout<<"acts_par(0): "<<acts_pars(0)<<std::endl;
@@ -614,7 +1201,6 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
     float lcl_meas_psuedo[SvtxAlignmentState::NLOC]{};
     float glbl_derivative_dummy_empty[SvtxAlignmentState::NGL]{};
     int glbl_label_dummy_empty[SvtxAlignmentState::NGL]{};
-    SvtxAlignmentState::ActsTrackParamsVector lcl_trackpars = state->get_acts_track_params();
     
     /// For N residual local coordinates x, z
     for (int i = 0; i < SvtxAlignmentState::NRES; ++i)
@@ -633,8 +1219,8 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
         if (trkrid == TrkrDefs::mvtxId)
         {
           // need stave to get clamshell
-           auto stave = MvtxDefs::getStaveId(ckey);
-          auto clamshell = AlignmentDefs::getMvtxClamshell(layer, stave);
+           auto stave4clam = MvtxDefs::getStaveId(ckey);
+          auto clamshell = AlignmentDefs::getMvtxClamshell(layer, stave4clam);
           if (is_layer_param_fixed(layer, j, fixed_layer_gparams) ||
               is_mvtx_layer_fixed(layer, clamshell))
           {
@@ -694,7 +1280,10 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
         std::cout << std::endl;
       }
 
-      if (clus_sigma(i) < 1.0)  // discards crazy clusters
+      if (clus_sigma(i) < 1.0 &&  // discards crazy clusters
+          std::isfinite(residual(i)) &&
+          allFinite(lcl_derivative[i], SvtxAlignmentState::NLOC) &&
+          allFinite(glbl_derivative[i], SvtxAlignmentState::NGL))
       {
         if (Verbosity() > 3)
         {
@@ -702,7 +1291,7 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
           AlignmentDefs::printBuffers(i, residual, clus_sigma, lcl_derivative[i], glbl_derivative[i], glbl_label);
         }
         float errinf = 1.0;
-        if (m_layerMisalignment.find(layer) != m_layerMisalignment.end())
+        if (m_layerMisalignment.contains(layer))
         {
           errinf = m_layerMisalignment.find(layer)->second;
         }
@@ -720,19 +1309,24 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
       }
       lcl_meas_psuedo[i] = state->get_local_psuedo_measurement_err()(i);
 
-      _mille->mille(SvtxAlignmentState::NLOC, lcl_derivative_psuedo[i], SvtxAlignmentState::NGL, glbl_derivative_dummy_empty, glbl_label_dummy_empty, 0.0, lcl_meas_psuedo[i]);
+      if (std::isfinite(lcl_meas_psuedo[i]) &&
+          allFinite(lcl_derivative_psuedo[i], SvtxAlignmentState::NLOC))
+      {
+        _mille->mille(SvtxAlignmentState::NLOC, lcl_derivative_psuedo[i], SvtxAlignmentState::NGL, glbl_derivative_dummy_empty, glbl_label_dummy_empty, 0.0, lcl_meas_psuedo[i]);
+      }
     }
 
     float ntp_data[] = {
       (float) layer, (float) stave, (float) chip, (float) residual(0), (float) residual(1), (float) clusphi, (float) global[0], (float) global[1], (float) global[2],
-      (float) clus_sigma(0), (float) clus_sigma(1), (float) lcl_trackpars(0), (float) lcl_trackpars(1), (float) lcl_trackpars(2), (float) lcl_trackpars(3), (float) lcl_trackpars(4), (float) lcl_trackpars(5),
+      (float) clus_sigma(0), (float) clus_sigma(1),
       lcl_derivative[0][0], lcl_derivative[0][1], lcl_derivative[0][2], lcl_derivative[0][3], lcl_derivative[0][4], lcl_derivative[0][5],
       glbl_derivative[0][0], glbl_derivative[0][1], glbl_derivative[0][2], glbl_derivative[0][3], glbl_derivative[0][4], glbl_derivative[0][5],
       lcl_derivative[1][0], lcl_derivative[1][1], lcl_derivative[1][2], lcl_derivative[1][3], lcl_derivative[1][4], lcl_derivative[1][5],
       glbl_derivative[1][0], glbl_derivative[1][1], glbl_derivative[1][2], glbl_derivative[1][3], glbl_derivative[1][4], glbl_derivative[1][5],
     };
 
-    if (m_ntuple) m_ntuple->Fill(ntp_data);
+    if (m_ntuple) { m_ntuple->Fill(ntp_data);
+}
   }
 
   return;
