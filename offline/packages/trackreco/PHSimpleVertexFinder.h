@@ -62,6 +62,7 @@ class PHSimpleVertexFinder : public SubsysReco
   void setTrackPtCut(const double cut) { _track_pt_cut = cut; }
   // void setUseTrackCovariance(bool set) {_use_track_covariance = set;}
   void setOutlierPairCut(const double cut) { _outlier_cut = cut; }
+  void setMaxFallbackDz(const double cut) { m_max_fallback_dz = cut; }
   void setTrackMapName(const std::string &name) { _track_map_name = name; }
   void setVertexMapName(const std::string &name) { _vertex_map_name = name; }
   void zeroField(const bool flag = true) { _zero_field = flag; }
@@ -113,6 +114,7 @@ class PHSimpleVertexFinder : public SubsysReco
   unsigned int _nintt_required = 1;
   double _track_pt_cut = 0.0;
   double _outlier_cut = 0.015;
+  double m_max_fallback_dz = 10.0;  // max |dz| (cm) for assigning closest vertex to unassociated tracks
 
   // name of TRKR_CLUSTER Container
   std::string m_clusterContainerName = "TRKR_CLUSTER";
