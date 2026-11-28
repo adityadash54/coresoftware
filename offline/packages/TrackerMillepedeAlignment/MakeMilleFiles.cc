@@ -103,6 +103,8 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
   steering_file.close();
 
   m_constraintFile.open(m_constraintFileName);
+  
+  /*
   if (m_useEventVertex)
   {
     for (int i : AlignmentDefs::glbl_vtx_label)
@@ -111,6 +113,8 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
       m_constraintFile << "       " << i << "   1" << std::endl;
     }
   }
+  */
+ 
   // print grouping setup to log file:
   std::cout << "MakeMilleFiles::InitRun: Surface groupings are mvtx " << mvtx_group << " intt " << intt_group << " tpc " << tpc_group << " mms " << mms_group << std::endl;
 
@@ -254,7 +258,9 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
       "dXdR:dXdZ0:dXdphi:dXdtheta:dXdqoverp:dXdt:"
       "dXdalpha:dXdbeta:dXdgamma:dXdx:dXdy:dXdz:"
       "dYdR:dYdZ0:dYdphi:dYdtheta:dYdqoverp:dYdt:"
-      "dYdalpha:dYdbeta:dYdgamma:dYdx:dYdy:dYdz"
+      "dYdalpha:dYdbeta:dYdgamma:dYdx:dYdy:dYdz:"
+      "event:track_id:track_crossing:vertex_id:"
+      "residual_vertexX:residual_vertexY:track_phi:track_eta:track_pt"
     );
     m_ntuple->SetDirectory(m_file);
 
@@ -267,7 +273,9 @@ int MakeMilleFiles::InitRun(PHCompositeNode* topNode)
         "dXdx:dXdy:dXdz:dYdx:dYdy:dYdz:"
         "track_xvtx:track_yvtx:track_zvtx:"
         "event_xvtx:event_yvtx:event_zvtx:track_phi:track_eta:track_p:track_pt:"
-        "n_tracks_vtx");
+        "n_tracks_vtx:"
+        "track_sigma_d0:track_sigma_z0:track_used_for_vtx:n_mvtx:n_intt:"
+        "event:track_crossing:vertex_id");
     track_ntp->SetDirectory(m_file);
   }
 
@@ -297,6 +305,8 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
   //   After processing all measurements for this track, call _mille->end() to add buffer to file and reset buffer
   // After all tracks are processed, file is closed when Mille destructor is called
   // Note: all units are in the Acts units of mm and GeV to avoid converting matrices
+
+  ++m_event;
 
   if (Verbosity() > 0)
   {
@@ -755,11 +765,21 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
       }
     }
 
+    // Track values for every ntp row of this track; the vertex residuals are
+    // added below when the event vertex is used.
+    NtpTrackInfo ntpTrackInfo;
+    ntpTrackInfo.trackId = static_cast<float>(track->get_id());
+    ntpTrackInfo.crossing = static_cast<float>(track->get_crossing());
+    ntpTrackInfo.vertexId = static_cast<float>(track->get_vertex_id());
+    ntpTrackInfo.phi = track->get_phi();
+    ntpTrackInfo.eta = track->get_eta();
+    ntpTrackInfo.pt = track->get_pt();
+
     // With the event vertex, the cluster residuals are written only after the
     // vertex constraint is verified to be usable (see below).
     if (!m_useEventVertex)
     {
-      addTrackToMilleFile(statevec);
+      addTrackToMilleFile(statevec, ntpTrackInfo);
     }
     else
     {
@@ -855,12 +875,20 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
           }
           continue;
         }
+        // OPTION-A-TEST: without per-cluster pseudo-measurements, a track without
+        // vertex pseudo-measurements has an (almost) unconstrained local fit
+        if (!success2)
+        {
+          continue;
+        }
         ++n_finite_vertex_residuals;
         if (m_trackCutFlow)
         {
           m_trackCutFlow->Fill(10.0);
         }
-        addTrackToMilleFile(statevec);
+        ntpTrackInfo.vertexResidualX = static_cast<float>(vtx_residual(0));
+        ntpTrackInfo.vertexResidualY = static_cast<float>(vtx_residual(1));
+        addTrackToMilleFile(statevec, ntpTrackInfo);
 
         if (!track_ntp)
         {
@@ -874,6 +902,21 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
         }
         else
         {
+          // Track d0/z0 sigma (mm) on the vertex perigee surface, the same
+          // frame as residualxsigma/residualysigma.
+          const double trackVarD0 = perigeeCov(Acts::eBoundLoc0, Acts::eBoundLoc0);
+          const double trackVarZ0 = perigeeCov(Acts::eBoundLoc1, Acts::eBoundLoc1);
+          const float trackSigmaD0 = trackVarD0 > 0
+                                         ? static_cast<float>(std::sqrt(trackVarD0))
+                                         : std::numeric_limits<float>::quiet_NaN();
+          const float trackSigmaZ0 = trackVarZ0 > 0
+                                         ? static_cast<float>(std::sqrt(trackVarZ0))
+                                         : std::numeric_limits<float>::quiet_NaN();
+          // 1: the track is in the vertex's track list, i.e. it was used to
+          // build the vertex in PHSimpleVertexFinder (same test as
+          // used_vertex_ntracks_per_crossing); 0: attached afterwards
+          const bool trackUsedForVertex =
+              svtxVertex->find_track(key) != svtxVertex->end_tracks();
           float track_ntp_data[] = {
               static_cast<float>(track->get_id()),
               track->get_quality(),
@@ -903,7 +946,15 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
               track->get_eta(),
               track->get_p(),
               track->get_pt(),
-              static_cast<float>(vertex_ntracks)};
+              static_cast<float>(vertex_ntracks),
+              trackSigmaD0,
+              trackSigmaZ0,
+              static_cast<float>(trackUsedForVertex),
+              static_cast<float>(nmvtx),
+              static_cast<float>(nintt),
+              static_cast<float>(m_event),
+              ntpTrackInfo.crossing,
+              ntpTrackInfo.vertexId};
           track_ntp->Fill(track_ntp_data);
           ++n_track_ntp_fills;
           if (m_trackNtpDiagnostics)
@@ -924,15 +975,23 @@ int MakeMilleFiles::process_event(PHCompositeNode* /*topNode*/)
                     << vtx_residual(1) << "), d(d0)/d(loc0) = "
                     << lclvtx_derivative[0][0] << std::endl;
         }
+ 
+        float glbl_derivative_vtx_dummy_empty[AlignmentDefs::NGLVTX]{};
         for (int i = 0; i < 2; i++)
-        {
+        { 
+          /*
           _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
                         AlignmentDefs::NGLVTX, glblvtx_derivative[i],
                         AlignmentDefs::glbl_vtx_label, vtx_residual(i),
                         m_vtxSigma(i) * m_vtxSigmaInflation);
+          */
+
+          _mille->mille(SvtxAlignmentState::NLOC, lclvtx_derivative[i],
+                          AlignmentDefs::NGLVTX, glbl_derivative_vtx_dummy_empty,
+                          AlignmentDefs::glbl_vtx_label, vtx_residual(i),
+                          m_vtxSigma(i) * m_vtxSigmaInflation);
         }
         // Vertex pseudo-measurements carry no global dependence
-        float glbl_derivative_vtx_dummy_empty[AlignmentDefs::NGLVTX]{};
         for (int i = 0; success2 && i < SvtxAlignmentState::NLOC; ++i)
         {
           if (!(localmeaserrpsuedo[i] > 0) || !std::isfinite(localmeaserrpsuedo[i]) ||
@@ -1628,7 +1687,8 @@ Acts::Vector3 MakeMilleFiles::getEventVertex(const SvtxTrack* track, const SvtxV
       svtxVertexOut->get_z());
 }
 
-void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec)
+void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec,
+                                         const NtpTrackInfo& trackInfo)
 {
   for (auto *state : statevec)
   {
@@ -1712,10 +1772,11 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
 
     float glbl_derivative[SvtxAlignmentState::NRES][SvtxAlignmentState::NGL]{};
     float lcl_derivative[SvtxAlignmentState::NRES][SvtxAlignmentState::NLOC]{};
-    float lcl_derivative_psuedo[SvtxAlignmentState::NLOC][SvtxAlignmentState::NLOC]{};
-    float lcl_meas_psuedo[SvtxAlignmentState::NLOC]{};
-    float glbl_derivative_dummy_empty[SvtxAlignmentState::NGL]{};
-    int glbl_label_dummy_empty[SvtxAlignmentState::NGL]{};
+    // OPTION-A-TEST: [[maybe_unused]] while the per-cluster pseudo-measurements are disabled (-Werror)
+    [[maybe_unused]] float lcl_derivative_psuedo[SvtxAlignmentState::NLOC][SvtxAlignmentState::NLOC]{};
+    [[maybe_unused]] float lcl_meas_psuedo[SvtxAlignmentState::NLOC]{};
+    [[maybe_unused]] float glbl_derivative_dummy_empty[SvtxAlignmentState::NGL]{};
+    [[maybe_unused]] int glbl_label_dummy_empty[SvtxAlignmentState::NGL]{};
     
     /// For N residual local coordinates x, z
     for (int i = 0; i < SvtxAlignmentState::NRES; ++i)
@@ -1824,6 +1885,10 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
       }
       lcl_meas_psuedo[i] = state->get_local_psuedo_measurement_err()(i);
 
+      // Commented when using OPTION-A-TEST, right now uncommented. OPTION-A-TEST: per-cluster pseudo-measurements disabled; the track parameters are
+      // constrained only by the vertex pseudo-measurements (C_perigee^-1) and the vertex rows
+
+      
       if (std::isfinite(lcl_meas_psuedo[i]) &&
           allFinite(lcl_derivative_psuedo[i], SvtxAlignmentState::NLOC))
       {
@@ -1854,6 +1919,9 @@ void MakeMilleFiles::addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statev
       glbl_derivative[0][0], glbl_derivative[0][1], glbl_derivative[0][2], glbl_derivative[0][3], glbl_derivative[0][4], glbl_derivative[0][5],
       lcl_derivative[1][0], lcl_derivative[1][1], lcl_derivative[1][2], lcl_derivative[1][3], lcl_derivative[1][4], lcl_derivative[1][5],
       glbl_derivative[1][0], glbl_derivative[1][1], glbl_derivative[1][2], glbl_derivative[1][3], glbl_derivative[1][4], glbl_derivative[1][5],
+      (float) m_event, trackInfo.trackId, trackInfo.crossing, trackInfo.vertexId,
+      trackInfo.vertexResidualX, trackInfo.vertexResidualY,
+      trackInfo.phi, trackInfo.eta, trackInfo.pt,
     };
 
     if (m_ntuple) { m_ntuple->Fill(ntp_data);

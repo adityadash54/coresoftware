@@ -128,7 +128,22 @@ class MakeMilleFiles : public SubsysReco
 
   bool is_tpc_sector_fixed(unsigned int layer, unsigned int sector, unsigned int side);
   bool is_mvtx_layer_fixed(unsigned int layer, unsigned int clamshell);
-  void addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec);
+  // Track values appended to every ntp row of the track. The vertex
+  // residuals (-DCA_xy, -DCA_z in mm, as in track_ntp) stay NaN when the
+  // event vertex is not used.
+  struct NtpTrackInfo
+  {
+    float trackId = std::numeric_limits<float>::quiet_NaN();
+    float crossing = std::numeric_limits<float>::quiet_NaN();
+    float vertexId = std::numeric_limits<float>::quiet_NaN();
+    float vertexResidualX = std::numeric_limits<float>::quiet_NaN();
+    float vertexResidualY = std::numeric_limits<float>::quiet_NaN();
+    float phi = std::numeric_limits<float>::quiet_NaN();
+    float eta = std::numeric_limits<float>::quiet_NaN();
+    float pt = std::numeric_limits<float>::quiet_NaN();
+  };
+  void addTrackToMilleFile(SvtxAlignmentStateMap::StateVec& statevec,
+                           const NtpTrackInfo& trackInfo);
   void getGlobalVtxDerivativesXY(SvtxTrack* track,
                                  const Acts::Vector3& vertex,
                                  float glblvtx_derivative[SvtxAlignmentState::NRES][3]);
@@ -226,6 +241,9 @@ class MakeMilleFiles : public SubsysReco
   TProfile* p_vertex_ntracks_vs_ntracks_crossing_attached{nullptr};
   TNtuple* m_ntuple{nullptr};
   TNtuple* track_ntp{nullptr};
+  // Events seen by this module in this job (from 1), written as "event" in
+  // ntp and track_ntp; (file, event, track_id) identifies a track.
+  unsigned int m_event{0};
 };
 
 #endif  // MAKEMILLEFILES_H
